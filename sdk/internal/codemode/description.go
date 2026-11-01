@@ -14,7 +14,7 @@ import (
 const DefaultInlineBudget = 3000
 
 const descriptionIntro = "Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), " +
-	"run as an async function body in a QuickJS sandbox: top-level `await` and `return` work. " +
+	"run as an async function body in a sandboxed JavaScript engine: top-level `await` and `return` work. " +
 	"No Node, file system, network, or timers.\n" +
 	"- `await tools.<name>({ ...args })` resolves to a string, or an object if the tool's declaration says so, " +
 	"and rejects with an Error on failure. A tool whose declaration returns an object resolves on failure too when " +

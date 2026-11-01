@@ -3,10 +3,14 @@ package codemode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/MoeForge/moejs"
 
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
 	"github.com/xiaokuang95/nulo/sdk/internal/toolsearch"
@@ -57,6 +61,9 @@ type RunOptions struct {
 	// Namespaces are the tool groups describeNamespace() knows about.
 	Namespaces []Namespace
 	Store      map[string]any
+	// MemoryLimit caps what one script may keep and allocate, in bytes. Zero
+	// means defaultMemoryLimit and a negative value no limit.
+	MemoryLimit int64
 }
 
 // normNamespace folds the spellings a script may use for a namespace: an optional
@@ -73,10 +80,6 @@ func Run(ctx context.Context, source string, opt RunOptions) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	// The caller's context bounds the whole run; the script's own deadline starts
-	// once the VM is booted, so boot time does not eat the script's budget.
-	runCtx, cancelRun := context.WithCancel(ctx)
-	defer cancelRun()
 
 	store := opt.Store
 	if store == nil {
@@ -118,36 +121,50 @@ func Run(ctx context.Context, source string, opt RunOptions) (Result, error) {
 	}
 
 	start := time.Now()
-	v, err := newJSVM(runCtx, h)
-	if err != nil {
-		return Result{}, err
-	}
-	defer v.Close()
+	v := newJSVM(opt.MemoryLimit, h)
 	if err := v.installBridge(); err != nil {
 		return Result{}, err
 	}
+	if err := v.runPrelude(); err != nil {
+		return Result{}, err
+	}
+
+	// The script's deadline starts once the engine is ready, so startup does not
+	// eat the script's budget. Interrupt works from another goroutine and stops
+	// an endless loop.
+	var timedOut atomic.Bool
 	if parsed.Options.TimeoutMs != nil {
-		timer := time.AfterFunc(time.Duration(*parsed.Options.TimeoutMs)*time.Millisecond, cancelRun)
+		timer := time.AfterFunc(time.Duration(*parsed.Options.TimeoutMs)*time.Millisecond, func() {
+			timedOut.Store(true)
+			v.interrupt("deadline")
+		})
 		defer timer.Stop()
 	}
+	if stop := watchCancel(ctx, v); stop != nil {
+		defer stop()
+	}
+
 	wrapped := wrapScript(parsed.Code, string(toolsJSON), string(storeJSON), string(namespacesJSON))
-	ptr, err := v.eval(wrapped, "<codemode>", evalAsync)
-	if err != nil {
-		return abortResult(ctx, runCtx, parsed, start, err)
+	if err := v.eval(wrapped); err != nil {
+		return engineFailure(parsed, opt.MemoryLimit, &timedOut, start, err)
 	}
-	if v.isException(ptr) {
-		ex, _ := v.call("qjs_get_exception")
-		return Result{OK: false, Error: v.toString(uint32(ex)), Elapsed: time.Since(start)}, nil
-	}
-	v.drainJobs()
 
 	h.mu.Lock()
 	items := append([]OutputItem(nil), h.out...)
 	ok := h.doneOK
 	donePayload := h.donePayload
+	finished := h.doneSeen
 	st := h.store
 	wrote := h.wrote
 	h.mu.Unlock()
+
+	if !finished {
+		ok = false
+		donePayload = mustFailure(scriptFailure{
+			Name:    "Error",
+			Message: "Script ended before it completed: an await never settled.",
+		})
+	}
 
 	content := formatOutput(items)
 	var text []string
@@ -168,18 +185,66 @@ func Run(ctx context.Context, source string, opt RunOptions) (Result, error) {
 	}, nil
 }
 
-// abortResult words an eval that stopped because the script's deadline or the
-// caller's context ended it, so the model sees why instead of a runtime error.
-func abortResult(ctx, runCtx context.Context, parsed ParsedSource, start time.Time, err error) (Result, error) {
-	if ctx.Err() == nil && runCtx.Err() == nil {
-		return Result{}, err
+// engineFailure words an engine error as a script failure the model can read: a
+// syntax error, an interrupt (deadline, cancellation or memory limit), or a
+// JavaScript exception with its stack.
+func engineFailure(parsed ParsedSource, memoryLimit int64, timedOut *atomic.Bool, start time.Time, err error) (Result, error) {
+	fail := func(name, message, stack string) (Result, error) {
+		return Result{
+			OK:      false,
+			Error:   mustFailure(scriptFailure{Name: name, Message: message, Stack: stack}),
+			Elapsed: time.Since(start),
+		}, nil
 	}
-	message := "This operation was aborted"
-	if ctx.Err() == nil && parsed.Options.TimeoutMs != nil {
-		message = "Execution exceeded the deadline of " + strconv.FormatInt(*parsed.Options.TimeoutMs, 10) + " ms"
+
+	var syntaxErr *moejs.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return fail("SyntaxError", syntaxErr.Error(), "")
 	}
-	payload, _ := json.Marshal(scriptFailure{Name: "Error", Message: message})
-	return Result{OK: false, Error: string(payload), Elapsed: time.Since(start)}, nil
+
+	var interrupted *moejs.InterruptedError
+	if errors.As(err, &interrupted) {
+		switch {
+		case errors.Is(err, moejs.ErrMemoryLimit):
+			return fail("Error", "Script exceeded its memory limit of "+strconv.FormatInt(memoryLimitBytes(memoryLimit)>>20, 10)+" MiB.", "")
+		case timedOut.Load() && parsed.Options.TimeoutMs != nil:
+			return fail("Error", "Execution exceeded the deadline of "+strconv.FormatInt(*parsed.Options.TimeoutMs, 10)+" ms.", "")
+		default:
+			return fail("Error", "This operation was aborted.", "")
+		}
+	}
+
+	var exc *moejs.Exception
+	if errors.As(err, &exc) {
+		return fail(exc.Name(), exc.Message(), exc.Stack)
+	}
+
+	return Result{}, err
+}
+
+// watchCancel interrupts a script when the caller's context ends. The returned
+// function stops watching, so a finished run is not interrupted afterwards.
+func watchCancel(ctx context.Context, v *jsVM) func() {
+	if ctx.Done() == nil {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			v.interrupt("aborted")
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
+}
+
+func mustFailure(f scriptFailure) string {
+	payload, err := json.Marshal(f)
+	if err != nil {
+		return `{"name":"Error","message":"the script failed"}`
+	}
+	return string(payload)
 }
 
 // sample is what discovery globals show for one tool.

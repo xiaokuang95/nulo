@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 1x1 PNG.
@@ -167,4 +168,26 @@ func TestTimeoutStopsRunawayLoop(t *testing.T) {
 		t.Fatalf("an endless loop should not finish: %+v", r)
 	}
 	t.Logf("err=%v r=%+v", err, r)
+}
+
+func TestMemoryLimitStopsScript(t *testing.T) {
+	r := run(t, `var a = []; for (;;) { a.push(new Array(100000).fill(1)); }`, RunOptions{MemoryLimit: 8 << 20})
+	if r.OK || !strings.Contains(r.Error, "memory limit") {
+		t.Fatalf("a runaway allocation should hit the limit: %+v", r)
+	}
+}
+
+func TestCancellationStopsScript(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	r, err := Run(ctx, `for (;;) {}`, RunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.OK || !strings.Contains(r.Error, "aborted") {
+		t.Fatalf("cancelling the context should stop the script: %+v", r)
+	}
 }

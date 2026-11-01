@@ -1,19 +1,14 @@
 package codemode
 
 import (
-	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	"github.com/MoeForge/moejs"
 )
-
-const evalAsync = 128
 
 // preludeJS defines the globals a script runs with: tools, ALL_TOOLS,
 // searchTools, text, image, console, store, load and exit.
@@ -21,198 +16,75 @@ const evalAsync = 128
 //go:embed prelude.js
 var preludeJS string
 
+// defaultMemoryLimit caps what one script may keep and allocate. A script that
+// passes it is interrupted and cannot catch the error, so a runaway string
+// cannot take the host down.
+const defaultMemoryLimit = 256 << 20
+
+// compiledPrelude is parsed and compiled once; every run's runtime evaluates
+// the same immutable script.
+var compiledPrelude = sync.OnceValues(func() (*moejs.Script, error) {
+	return moejs.CompileScript("codemode-prelude.js", preludeJS)
+})
+
+// jsVM is one JavaScript global environment. A run gets its own, so scripts
+// share no globals and the runtime is cheap enough to rebuild per call.
 type jsVM struct {
-	ctx context.Context
-	rt  wazero.Runtime
-	mod api.Module
-	mem api.Memory
-	mu  sync.Mutex
-	h   *Host
+	rt *moejs.Runtime
+	h  *Host
 }
 
-func newJSVM(ctx context.Context, h *Host) (*jsVM, error) {
-	// WithCloseOnContextDone lets the script's deadline abort a runaway loop: the
-	// runtime closes the module and the call in flight returns.
-	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true))
-	if _, err := wasi_snapshot_preview1.Instantiate(ctx, rt); err != nil {
-		rt.Close(ctx)
-		return nil, err
-	}
-	v := &jsVM{ctx: ctx, rt: rt, h: h}
-	env := rt.NewHostModuleBuilder("env")
-	env.NewFunctionBuilder().WithFunc(v.hostCall).Export("host_call")
-	env.NewFunctionBuilder().WithFunc(func() uint32 { return 0 }).Export("host_interrupt")
-	env.NewFunctionBuilder().WithFunc(func(uint32, uint32, uint32) {}).Export("host_promise_rejection")
-	env.NewFunctionBuilder().WithFunc(func(uint32, uint32) uint32 { return 0 }).Export("host_module_normalize")
-	env.NewFunctionBuilder().WithFunc(func(uint32, uint32) uint32 { return 0 }).Export("host_module_load")
-	env.NewFunctionBuilder().WithFunc(func(int32, int32) int32 { return 0 }).Export("host_get_timezone_offset")
-	if _, err := env.Instantiate(ctx); err != nil {
-		rt.Close(ctx)
-		return nil, err
-	}
-	mod, err := rt.Instantiate(ctx, quickjsWasm)
-	if err != nil {
-		rt.Close(ctx)
-		return nil, err
-	}
-	v.mod = mod
-	v.mem = mod.Memory()
-	if err := v.callVoid("_initialize"); err != nil {
-		v.Close()
-		return nil, err
-	}
-	if _, err := v.call("qjs_init"); err != nil {
-		v.Close()
-		return nil, err
-	}
-	return v, nil
-}
-
-func (v *jsVM) Close() {
-	if v.rt != nil {
-		_ = v.rt.Close(v.ctx)
-	}
-}
-
-func (v *jsVM) call(name string, args ...uint64) (uint64, error) {
-	fn := v.mod.ExportedFunction(name)
-	if fn == nil {
-		return 0, fmt.Errorf("missing export %s", name)
-	}
-	res, err := fn.Call(v.ctx, args...)
-	if err != nil {
-		return 0, err
-	}
-	if len(res) == 0 {
-		return 0, nil
-	}
-	return res[0], nil
-}
-
-func (v *jsVM) callVoid(name string, args ...uint64) error {
-	fn := v.mod.ExportedFunction(name)
-	if fn == nil {
-		return fmt.Errorf("missing export %s", name)
-	}
-	_, err := fn.Call(v.ctx, args...)
-	return err
-}
-
-func (v *jsVM) malloc(n uint32) (uint32, error) {
-	p, err := v.call("wasm_malloc", uint64(n))
-	return uint32(p), err
-}
-
-func (v *jsVM) writeCString(s string) (ptr uint32, n uint32, err error) {
-	b := append([]byte(s), 0)
-	p, err := v.malloc(uint32(len(b)))
-	if err != nil {
-		return 0, 0, err
-	}
-	if !v.mem.Write(p, b) {
-		return 0, 0, fmt.Errorf("write mem")
-	}
-	return p, uint32(len(s)), nil
-}
-
-func (v *jsVM) eval(code, filename string, flags uint64) (uint32, error) {
-	cp, clen, err := v.writeCString(code)
-	if err != nil {
-		return 0, err
-	}
-	fp, _, err := v.writeCString(filename)
-	if err != nil {
-		return 0, err
-	}
-	res, err := v.call("qjs_eval", uint64(cp), uint64(clen), uint64(fp), flags)
-	_ = v.callVoid("wasm_free", uint64(cp))
-	_ = v.callVoid("wasm_free", uint64(fp))
-	return uint32(res), err
-}
-
-func (v *jsVM) isException(ptr uint32) bool {
-	r, _ := v.call("qjs_is_exception", uint64(ptr))
-	return r != 0
-}
-
-func (v *jsVM) toString(ptr uint32) string {
-	sp, err := v.call("qjs_get_string", uint64(ptr))
-	if err != nil || sp == 0 {
-		return ""
-	}
-	return v.readCString(uint32(sp))
-}
-
-func (v *jsVM) readCString(ptr uint32) string {
-	if ptr == 0 {
-		return ""
-	}
-	var b []byte
-	for i := uint32(0); i < 1<<20; i++ {
-		by, ok := v.mem.ReadByte(ptr + i)
-		if !ok || by == 0 {
-			break
-		}
-		b = append(b, by)
-	}
-	return string(b)
-}
-
-func (v *jsVM) hostCall(namePtr, nameLen, thisPtr, argc, argvPtr uint32) uint32 {
-	name, _ := v.mem.Read(namePtr, nameLen)
-	if string(name) != "nulo_call" {
+// memoryLimitBytes resolves the configured limit: zero means the default and a
+// negative value means no limit.
+func memoryLimitBytes(configured int64) int64 {
+	switch {
+	case configured < 0:
 		return 0
+	case configured == 0:
+		return defaultMemoryLimit
 	}
-	args := make([]string, 0, argc)
-	for i := uint32(0); i < argc; i++ {
-		p, _ := v.mem.ReadUint32Le(argvPtr + i*4)
-		args = append(args, v.toString(p))
-	}
-	out := v.h.dispatch(args)
-	sp, sl, err := v.writeCString(out)
-	if err != nil {
-		return 0
-	}
-	js, err := v.call("qjs_new_string", uint64(sp), uint64(sl))
-	_ = v.callVoid("wasm_free", uint64(sp))
-	if err != nil {
-		return 0
-	}
-	return uint32(js)
+	return configured
 }
 
+func newJSVM(memoryLimit int64, h *Host) *jsVM {
+	return &jsVM{rt: moejs.NewRuntime(moejs.Options{MemoryLimit: memoryLimitBytes(memoryLimit)}), h: h}
+}
+
+// installBridge exposes the host to scripts as `nulo_call`.
 func (v *jsVM) installBridge() error {
-	np, nl, err := v.writeCString("nulo_call")
+	return v.rt.SetGlobal("nulo_call", moejs.NativeFunc(
+		func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			in := make([]string, 0, len(args))
+			for i := range args {
+				in = append(in, args[i].String())
+			}
+			return moejs.String(v.h.dispatch(in)), nil
+		}))
+}
+
+func (v *jsVM) runPrelude() error {
+	script, err := compiledPrelude()
 	if err != nil {
 		return err
 	}
-	fn, err := v.call("qjs_new_host_function", uint64(np), uint64(nl), 0)
-	_ = v.callVoid("wasm_free", uint64(np))
-	if err != nil {
-		return err
-	}
-	g, err := v.call("qjs_get_global")
-	if err != nil {
-		return err
-	}
-	gn, _, err := v.writeCString("nulo_call")
-	if err != nil {
-		return err
-	}
-	_, err = v.call("qjs_set_prop_string", g, uint64(gn), fn)
-	_ = v.callVoid("wasm_free", uint64(gn))
+	_, err = v.rt.RunScript(script)
 	return err
 }
 
-func (v *jsVM) drainJobs() {
-	for i := 0; i < 10000; i++ {
-		pending, _ := v.call("qjs_is_job_pending")
-		if pending == 0 {
-			return
-		}
-		_, _ = v.call("qjs_execute_pending_job")
+// eval compiles and runs one script. Jobs the script queued, promise reactions
+// included, run before RunScript returns.
+func (v *jsVM) eval(source string) error {
+	script, err := moejs.CompileScript("<codemode>", source)
+	if err != nil {
+		return err
 	}
+	_, err = v.rt.RunScript(script)
+	return err
 }
+
+// interrupt stops the running script from another goroutine, even one in an
+// endless loop. reason reaches the run as the interrupt's error text.
+func (v *jsVM) interrupt(reason string) { v.rt.Interrupt(reason) }
 
 func (h *Host) dispatch(args []string) string {
 	if len(args) == 0 {
@@ -241,26 +113,6 @@ func (h *Host) dispatch(args []string) string {
 		}
 		b, _ := json.Marshal(map[string]any{"ok": res})
 		return string(b)
-	case "output":
-		if len(args) > 2 {
-			item := OutputItem{Kind: OutputKind(args[1]), Text: args[2]}
-			if item.Kind == OutputImage {
-				item.Data = args[2]
-				item.Text = ""
-				if len(args) > 3 {
-					item.MIME = args[3]
-				}
-			}
-			h.mu.Lock()
-			h.out = append(h.out, item)
-			h.mu.Unlock()
-		}
-		return "null"
-	case "search":
-		if len(args) > 1 {
-			return h.search(args[1])
-		}
-		return "[]"
 	case "writes":
 		// The prelude batches store() changes: one entry per key, [key] for a
 		// delete and [key, json] for a write.
@@ -290,8 +142,29 @@ func (h *Host) dispatch(args []string) string {
 			}
 		}
 		return "null"
+	case "output":
+		if len(args) > 2 {
+			item := OutputItem{Kind: OutputKind(args[1]), Text: args[2]}
+			if item.Kind == OutputImage {
+				item.Data = args[2]
+				item.Text = ""
+				if len(args) > 3 {
+					item.MIME = args[3]
+				}
+			}
+			h.mu.Lock()
+			h.out = append(h.out, item)
+			h.mu.Unlock()
+		}
+		return "null"
+	case "search":
+		if len(args) > 1 {
+			return h.search(args[1])
+		}
+		return "[]"
 	case "done":
 		h.mu.Lock()
+		h.doneSeen = true
 		h.doneOK = len(args) > 1 && args[1] == "1"
 		if len(args) > 2 {
 			h.donePayload = args[2]
@@ -313,6 +186,10 @@ type Host struct {
 	out         []OutputItem
 	doneOK      bool
 	donePayload string
+
+	// doneSeen reports whether the prelude reported an outcome, so a run that
+	// silently never settled can be told apart from a clean one.
+	doneSeen bool
 }
 
 func (h *Host) callTool(name string, args map[string]any) (string, error) {
@@ -325,12 +202,12 @@ func (h *Host) callTool(name string, args map[string]any) (string, error) {
 	return fn(args)
 }
 
-// wrapScript builds the program evaluated for one run: the prelude, then the
-// user's code inside an async function so top-level await works.
+// wrapScript builds the program evaluated for one run: the compiled prelude
+// first, then the user's code inside an async function so top-level await
+// works.
 func wrapScript(user, toolsJSON, storeJSON, namespacesJSON string) string {
 	var b strings.Builder
-	b.WriteString(preludeJS)
-	b.WriteString("\n(function(){try{__nulo_init(")
+	b.WriteString("(function(){try{__nulo_init(")
 	b.WriteString(jsString(toolsJSON))
 	b.WriteString(",")
 	b.WriteString(jsString(storeJSON))

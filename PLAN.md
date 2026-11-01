@@ -38,7 +38,7 @@ github.com/xiaokuang95/nulo
   prompt/      SystemPrompt sections、AGENTS.md
   skills/      SKILL.md 发现与 /skill:name
   mcp/         MCP 客户端（stdio + streamable HTTP）
-  codemode/    QuickJS-WASM 宿主 + codemode 工具
+  codemode/    moejs 宿主 + codemode 工具
   examples/sdk/
 ```
 
@@ -184,7 +184,9 @@ frontmatter 按 Pi 的方式提取：CRLF 归一、去 BOM、闭合围栏是 off
 
 模型写 JS 调其它工具，只有脚本输出回模型。沙箱语义跟 Pi：无文件系统/网络/定时器，只有 `tools` / `text` / `image` / `console` / `store`/`load` / `ALL_TOOLS` / `searchTools` / `describeTool` / `describeNamespace`。
 
-实现：把 Pi 同款 **QuickJS WASM** 当 asset，用 wazero 跑；**不**用 goja 冒充。`models` 全局第一期只列出 chat 模型、不能从脚本跑 classifier/image。
+实现：纯 Go 的 **moejs**（`github.com/MoeForge/moejs`）当引擎，和 Pi 的 QuickJS-WASM 语义对齐，但不是 goja 冒充。每次 Run 新建 Runtime，prelude 用 `CompileScript` 编译一次复用；`models` 全局第一期只列出 chat 模型、不能从脚本跑 classifier/image。
+
+性能与约束：一次脚本约 0.1ms（旧实现每次 Run 重新编译 623KB QuickJS WASM，约 370ms）。超时走 `Runtime.Interrupt`（另一 goroutine 可中断死循环），内存走 `Options.MemoryLimit`（默认 256MiB），调用方取消会中断脚本。
 
 激活方式对齐 Pi SDK：默认 **不** 进工具表；`tools: ["+codemode"]` 或 `SetActiveTools` 打开。成功脚本的 `store` 落 `custom` 条目 `codemode-store`，resume 按枝恢复。
 
