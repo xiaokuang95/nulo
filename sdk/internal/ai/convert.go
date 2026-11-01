@@ -1,6 +1,17 @@
 package ai
 
+// openaiMessageOptions carries the per-model compat that changes message shape.
+type openaiMessageOptions struct {
+	// ToolResultName adds the name field to tool result messages, which some
+	// OpenAI-compatible providers require.
+	ToolResultName bool
+}
+
 func openaiMessages(tr Transcript) (system string, msgs []map[string]any) {
+	return openaiMessagesWith(tr, openaiMessageOptions{})
+}
+
+func openaiMessagesWith(tr Transcript, o openaiMessageOptions) (system string, msgs []map[string]any) {
 	sys := GetCurrentSystemMessage(tr.Messages)
 	if sys != nil {
 		system = SystemMessageText(*sys)
@@ -39,11 +50,15 @@ func openaiMessages(tr Transcript) (system string, msgs []map[string]any) {
 			}
 			msgs = append(msgs, om)
 		case "toolResult":
-			msgs = append(msgs, map[string]any{
+			result := map[string]any{
 				"role":         "tool",
 				"tool_call_id": m.ToolCallID,
 				"content":      m.ContentString(),
-			})
+			}
+			if o.ToolResultName && m.ToolName != "" {
+				result["name"] = m.ToolName
+			}
+			msgs = append(msgs, result)
 		}
 	}
 	return system, msgs

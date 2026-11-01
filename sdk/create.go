@@ -28,9 +28,9 @@ func BuildModel(spec string, svcs *AgentSessionServices) (Model, error) {
 	if svcs != nil {
 		dir = svcs.AgentDir
 	}
-	models := ai.LoadModels(dir)
-	if m, ok := ai.FindModel(spec, models); ok {
-		return m, nil
+	providers, err := ai.LoadProviders(dir)
+	if err != nil {
+		return Model{}, err
 	}
-	return Model{}, errUnknownModel(spec)
+	return providers.FindModel(spec)
 }

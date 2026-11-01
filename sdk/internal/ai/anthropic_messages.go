@@ -11,7 +11,7 @@ import (
 )
 
 func StreamAnthropicMessages(ctx context.Context, model Model, tr Transcript, opts StreamOptions) *EventStream {
-	key := LookupAPIKey(model.Provider, "", opts)
+	key := LookupAPIKey(model, "", opts)
 	if key == "" {
 		return errorStream(model, "provider is not configured: "+model.Provider, StopError)
 	}
@@ -50,7 +50,7 @@ func StreamAnthropicMessages(ctx context.Context, model Model, tr Transcript, op
 	req.Header.Set("x-api-key", key)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range opts.Headers {
+	for k, v := range RequestHeaders(model, opts) {
 		req.Header.Set(k, v)
 	}
 	return streamHTTP(ctx, model, req, parseAnthropic)
@@ -78,6 +78,14 @@ func parseAnthropic(s *EventStream, model Model, r io.Reader) {
 		switch event {
 		case "message_start":
 			ensureStart()
+			// Anthropic reports the prompt side here and revises the output side in
+			// message_delta.
+			if msg, ok := payload["message"].(map[string]any); ok {
+				var f anthropicUsageFields
+				if decodeAs(msg["usage"], &f) {
+					f.apply(partial.Usage, model)
+				}
+			}
 		case "content_block_start":
 			ensureStart()
 			idx := intFrom(payload["index"])
@@ -160,6 +168,10 @@ func parseAnthropic(s *EventStream, model Model, r io.Reader) {
 				if sr, _ := d["stop_reason"].(string); sr != "" {
 					stop = sr
 				}
+			}
+			var f anthropicUsageFields
+			if decodeAs(payload["usage"], &f) {
+				f.apply(partial.Usage, model)
 			}
 		}
 		return nil

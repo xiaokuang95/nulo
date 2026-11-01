@@ -76,9 +76,13 @@ type Config struct {
 	FinishTurn      func(ctx context.Context, turn TurnContext) *TurnDecision
 	PrepareRequest  func(ctx context.Context, c Context, model ai.Model) Context
 	PrepareNextTurn func(ctx context.Context, turn TurnContext) *TurnUpdate
-	GetSteering     func() []ai.Message
-	GetFollowUp     func() []ai.Message
-	StreamOptions   ai.StreamOptions
+	// AfterToolBatch runs once a tool batch has finished, so a tool that loads
+	// more tools (tool_search) can extend the active set. The change is picked
+	// up by the next declareToolChanges, which records it in the transcript.
+	AfterToolBatch func(c *Context)
+	GetSteering    func() []ai.Message
+	GetFollowUp    func() []ai.Message
+	StreamOptions  ai.StreamOptions
 }
 
 type TurnUpdate struct {

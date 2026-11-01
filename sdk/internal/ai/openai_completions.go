@@ -12,24 +12,35 @@ import (
 )
 
 func StreamOpenAICompletions(ctx context.Context, model Model, tr Transcript, opts StreamOptions) *EventStream {
-	key := LookupAPIKey(model.Provider, "", opts)
+	key := LookupAPIKey(model, "", opts)
 	if key == "" {
 		return errorStream(model, "provider is not configured: "+model.Provider, StopError)
 	}
-	system, msgs := openaiMessages(tr)
+	system, msgs := openaiMessagesWith(tr, openaiMessageOptions{ToolResultName: model.Compat.ToolResultName()})
 	if system != "" {
-		msgs = append([]map[string]any{{"role": "system", "content": system}}, msgs...)
+		role := "system"
+		if model.Compat.DeveloperRole(false) {
+			role = "developer"
+		}
+		msgs = append([]map[string]any{{"role": role, "content": system}}, msgs...)
 	}
 	body := map[string]any{
 		"model":    model.ID,
 		"messages": msgs,
 		"stream":   true,
 	}
+	// Without this the provider sends no usage at all on a streamed response.
+	if model.Compat.UsageInStreaming() {
+		body["stream_options"] = map[string]any{"include_usage": true}
+	}
 	if tools := openaiTools(GetCurrentTools(tr.Messages)); len(tools) > 0 {
 		body["tools"] = tools
 	}
 	if opts.MaxTokens > 0 {
-		body["max_tokens"] = opts.MaxTokens
+		body[model.Compat.TokensField()] = opts.MaxTokens
+	}
+	if model.Compat.Store() {
+		body["store"] = false
 	}
 	raw, _ := json.Marshal(body)
 	base := strings.TrimRight(model.BaseURL, "/")
@@ -42,28 +53,35 @@ func StreamOpenAICompletions(ctx context.Context, model Model, tr Transcript, op
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range opts.Headers {
+	for k, v := range RequestHeaders(model, opts) {
 		req.Header.Set(k, v)
 	}
 	return streamHTTP(ctx, model, req, parseOpenAICompletions)
 }
 
 type oaiDelta struct {
-	Choices []struct {
-		Delta struct {
-			Content   string `json:"content"`
-			ToolCalls []struct {
-				Index    int    `json:"index"`
-				ID       string `json:"id"`
-				Type     string `json:"type"`
-				Function struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
-				} `json:"function"`
-			} `json:"tool_calls"`
-		} `json:"delta"`
-		FinishReason string `json:"finish_reason"`
-	} `json:"choices"`
+	Choices []oaiChoice     `json:"choices"`
+	Usage   *oaiUsageFields `json:"usage"`
+}
+
+type oaiChoice struct {
+	Delta        oaiDeltaBody `json:"delta"`
+	FinishReason string       `json:"finish_reason"`
+	// Some providers (Moonshot, for one) report usage here instead of on the chunk.
+	Usage *oaiUsageFields `json:"usage"`
+}
+
+type oaiDeltaBody struct {
+	Content   string `json:"content"`
+	ToolCalls []struct {
+		Index    int    `json:"index"`
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	} `json:"tool_calls"`
 }
 
 func parseOpenAICompletions(s *EventStream, model Model, r io.Reader) {
@@ -91,10 +109,18 @@ func parseOpenAICompletions(s *EventStream, model Model, r io.Reader) {
 			started = true
 			s.Push(AssistantMessageEvent{Type: "start", Partial: cloneMsg(&partial)})
 		}
+		// Usage arrives on its own final chunk, which carries no choices, so it has to
+		// be read before bailing out on an empty choice list.
+		if d.Usage != nil {
+			partial.Usage = parseChunkUsage(*d.Usage, model)
+		}
 		if len(d.Choices) == 0 {
 			return nil
 		}
 		ch := d.Choices[0]
+		if d.Usage == nil && ch.Usage != nil {
+			partial.Usage = parseChunkUsage(*ch.Usage, model)
+		}
 		if ch.FinishReason != "" {
 			finish = ch.FinishReason
 		}

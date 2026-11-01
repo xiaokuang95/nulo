@@ -76,7 +76,9 @@ func (r *Runtime) newManager(opt SessionStartOptions) *session.Manager {
 	if inMemory {
 		return session.InMemory(r.Services.CWD)
 	}
-	return session.Create(r.Services.CWD, session.SessionDir(r.Services.AgentDir, r.Services.CWD))
+	// DefaultSessionDir honours $NULO_CODING_AGENT_SESSION_DIR; SessionDirIn appends
+	// the per-cwd directory inside whichever root that resolves to.
+	return session.Create(r.Services.CWD, session.SessionDirIn(DefaultSessionDir(r.Services.AgentDir), r.Services.CWD))
 }
 
 func (r *Runtime) replace(mgr *session.Manager, opt SessionStartOptions) (*Session, error) {

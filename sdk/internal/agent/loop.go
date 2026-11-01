@@ -95,6 +95,9 @@ func runLoop(ctx context.Context, current *Context, newMessages *[]ai.Message, c
 					current.Messages = append(current.Messages, r)
 					*newMessages = append(*newMessages, r)
 				}
+				if cfg.AfterToolBatch != nil {
+					cfg.AfterToolBatch(current)
+				}
 			}
 
 			lastTurn = &TurnContext{Message: msg, ToolResults: results, Context: *current, NewMessages: append([]ai.Message{}, *newMessages...)}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,9 @@ func TestEditNotUnique(t *testing.T) {
 }
 
 func TestBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows runs commands through PowerShell; bash needs a POSIX shell")
+	}
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hi"), 0o644)
 	b := Bash(dir)
@@ -64,5 +68,16 @@ func TestBash(t *testing.T) {
 	}
 	if !strings.Contains(res.Content[0].Text, "hi") {
 		t.Fatalf("%q", res.Content[0].Text)
+	}
+}
+
+func TestDefaultUsesOneShellPerPlatform(t *testing.T) {
+	got := Names(Default(t.TempDir()))
+	want := []string{"read", "bash", "edit", "write"}
+	if runtime.GOOS == "windows" {
+		want = []string{"read", "powershell", "edit", "write"}
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("Default() = %v, want %v", got, want)
 	}
 }

@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
@@ -56,11 +57,18 @@ func TestSetActiveToolsAllowlist(t *testing.T) {
 	if len(names) != 1 || names[0] != "read" {
 		t.Fatalf("allowlist %v", names)
 	}
-	sess.SetActiveTools([]string{"+bash"})
+	// "+name" adds a catalogue tool without clearing the current set. Naming the
+	// platform's own shell keeps this about the modifier rather than about which
+	// shell the platform ships.
+	shell := "bash"
+	if runtime.GOOS == "windows" {
+		shell = "powershell"
+	}
+	sess.SetActiveTools([]string{"+" + shell})
 	names = toolNames(sess)
-	want := map[string]bool{"read": true, "bash": true}
+	want := map[string]bool{"read": true, shell: true}
 	if len(names) != 2 {
-		t.Fatalf("+bash %v", names)
+		t.Fatalf("+%s %v", shell, names)
 	}
 	for _, n := range names {
 		if !want[n] {

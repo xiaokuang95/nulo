@@ -7,10 +7,17 @@ import (
 	"strings"
 )
 
-func LookupAPIKey(provider, agentDir string, opts StreamOptions) string {
+// LookupAPIKey resolves a provider's key: an explicit per-request key, then the
+// provider's apiKey from models.json, then a per-request env override, then
+// auth.json, then the process environment.
+func LookupAPIKey(model Model, agentDir string, opts StreamOptions) string {
 	if opts.APIKey != "" {
 		return opts.APIKey
 	}
+	if model.APIKey != "" {
+		return model.APIKey
+	}
+	provider := model.Provider
 	if opts.Env != nil {
 		if k := keyFromEnvMap(provider, opts.Env); k != "" {
 			return k
@@ -76,43 +83,4 @@ func keyFromFile(provider, agentDir string) string {
 		return ""
 	}
 	return rec.Key
-}
-
-func LoadModels(agentDir string) []Model {
-	if agentDir == "" {
-		return nil
-	}
-	b, err := os.ReadFile(filepath.Join(agentDir, "models.json"))
-	if err != nil {
-		return nil
-	}
-	var wrap struct {
-		Models []Model `json:"models"`
-	}
-	if err := json.Unmarshal(b, &wrap); err == nil && len(wrap.Models) > 0 {
-		return wrap.Models
-	}
-	var list []Model
-	if err := json.Unmarshal(b, &list); err == nil {
-		return list
-	}
-	return nil
-}
-
-func FindModel(spec string, models []Model) (Model, bool) {
-	spec = strings.TrimSpace(spec)
-	provider, id, ok := strings.Cut(spec, "/")
-	if !ok {
-		id = spec
-		provider = ""
-	}
-	for _, m := range models {
-		if (provider == "" || m.Provider == provider) && m.ID == id {
-			return m, true
-		}
-		if spec == m.Provider+"/"+m.ID {
-			return m, true
-		}
-	}
-	return Model{}, false
 }

@@ -34,23 +34,32 @@ type NavigateTreeOptions struct {
 }
 
 type Session struct {
-	mu         sync.Mutex
-	services   *AgentSessionServices
-	manager    *session.Manager
-	model      ai.Model
-	catalog    []agent.AgentTool
-	tools      []agent.AgentTool
-	listeners  []func(Event)
-	cancel     context.CancelFunc
-	runDone    chan struct{}
-	steering   []ai.Message
-	followup   []ai.Message
-	persistErr error
-	streaming  bool
-	disposed   bool
-	system     string
-	skills     []skills.Skill
-	mcp        []*mcp.Client
+	mu               sync.Mutex
+	services         *AgentSessionServices
+	manager          *session.Manager
+	model            ai.Model
+	catalog          []agent.AgentTool
+	tools            []agent.AgentTool
+	listeners        []func(Event)
+	cancel           context.CancelFunc
+	runDone          chan struct{}
+	steering         []ai.Message
+	followup         []ai.Message
+	persistErr       error
+	streaming        bool
+	disposed         bool
+	system           string
+	skills           []skills.Skill
+	skillDiagnostics []skills.Diagnostic
+	mcp              []*mcp.Client
+	servers          []mcp.Connected
+
+	// Per-tool exposure from mcp.json; a server's tools can be split across
+	// direct, codemode, deferred, and hidden.
+	toolExposure   map[string]mcp.Exposure
+	toolNamespace  map[string]string
+	pendingTools   []agent.AgentTool
+	mcpDiagnostics []string
 }
 
 func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionStartOptions) (*Session, error) {
@@ -68,14 +77,65 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 	if s.model.ID == "" {
 		s.model = ai.DefaultFauxModel()
 	}
-	s.skills = skills.Discover(svcs.CWD, svcs.AgentDir, svcs.ProjectTrusted)
-	cfgs := mcp.Load(svcs.AgentDir, svcs.CWD, svcs.ProjectTrusted)
+	loaded := skills.LoadSkills(skills.LoadOptions{
+		Cwd:             svcs.CWD,
+		AgentDir:        svcs.AgentDir,
+		ProjectTrusted:  svcs.ProjectTrusted,
+		IncludeDefaults: true,
+	})
+	s.skills = loaded.Skills
+	s.skillDiagnostics = loaded.Diagnostics
+	cfg := mcp.Load(svcs.AgentDir, svcs.CWD, svcs.ProjectTrusted)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	clients, mcpTools := mcp.ConnectAll(ctx, cfgs)
-	s.mcp = clients
-	s.tools = append(s.tools, mcpTools...)
+
+	// The catalogue starts as the built-in tools; a host may have narrowed the
+	// active set, but codemode can still call everything the catalogue holds.
 	s.catalog = append([]agent.AgentTool(nil), s.tools...)
+
+	// Exposure decides where each tool lands. codemode keeps them out of the
+	// model's tool list so a large server does not cost every request; deferred
+	// waits for tool_search; direct declares them like built-in tools; hidden
+	// drops them.
+	s.toolExposure = map[string]mcp.Exposure{}
+	s.toolNamespace = map[string]string{}
+	s.mcpDiagnostics = append(s.mcpDiagnostics, cfg.Errors...)
+
+	s.servers = mcp.ConnectAll(ctx, cfg.Servers)
+	autoCodemode := false
+	deferred := false
+	for _, srv := range s.servers {
+		s.mcp = append(s.mcp, srv.Client)
+		// Pi decides from the configuration, not from the tools that connected,
+		// so an exposure with no matching tool still turns its mechanism on.
+		if srv.Exposures[mcp.ExposureCodemode] {
+			autoCodemode = true
+		}
+		if srv.Exposures[mcp.ExposureDeferred] {
+			deferred = true
+		}
+		for _, entry := range srv.Tools {
+			s.toolExposure[entry.Tool.Name] = entry.Exposure
+			s.toolNamespace[entry.Tool.Name] = mcp.Namespace(srv.Name)
+			switch entry.Exposure {
+			case mcp.ExposureHidden:
+				// Not reachable at all.
+			case mcp.ExposureDirect:
+				s.tools = append(s.tools, entry.Tool)
+				s.catalog = append(s.catalog, entry.Tool)
+			case mcp.ExposureDeferred, mcp.ExposureCodemode:
+				s.catalog = append(s.catalog, entry.Tool)
+			}
+		}
+	}
+	// Deferred tools are only reachable once tool_search loads them.
+	if deferred {
+		s.tools = append(s.tools, s.toolSearchTool())
+	}
+	// Pi turns codemode on so a codemode-exposed server is actually reachable.
+	if autoCodemode && cfg.AutoEnableCodemode {
+		s.ensureCodemodeLocked(true)
+	}
 	s.ensureSystem()
 	return s, nil
 }
@@ -87,6 +147,7 @@ func (s *Session) ensureSystem() {
 		CustomPrompt:   s.system,
 		Tools:          s.tools,
 		Skills:         s.skills,
+		MCPServers:     s.mcpPromptServers(),
 		NoContextFiles: s.services.NoContextFiles,
 		ProjectTrusted: s.services.ProjectTrusted,
 	})
@@ -215,6 +276,15 @@ func (s *Session) config() agent.Config {
 		StreamFn:     fn,
 		GetSteering:  s.drainSteering,
 		GetFollowUp:  s.drainFollowUp,
+		AfterToolBatch: func(c *agent.Context) {
+			s.mu.Lock()
+			pending := s.pendingTools
+			s.pendingTools = nil
+			s.mu.Unlock()
+			if len(pending) > 0 {
+				c.Tools = append(c.Tools, pending...)
+			}
+		},
 		PrepareRequest: func(ctx context.Context, c agent.Context, model ai.Model) agent.Context {
 			c.Messages = mgr.Project().Messages
 			return c
@@ -476,25 +546,145 @@ func commonAncestor(a, b []session.Entry) string {
 
 func (s *Session) Manager() *session.Manager { return s.manager }
 
+// SkillDiagnostic is a warning produced while discovering skills. Pi reports
+// these at startup and carries on; nulo keeps them here for the host to show.
+type SkillDiagnostic struct {
+	Type      string
+	Message   string
+	Path      string
+	Collision *SkillCollision
+}
+
+// MCPDiagnostics returns the problems found while loading mcp.json. Pi reports
+// them at startup and keeps the servers that did load; nulo does the same and
+// leaves the reporting to the host.
+func (s *Session) MCPDiagnostics() []string {
+	return append([]string(nil), s.mcpDiagnostics...)
+}
+
+// SkillCollision names the winning and losing file of a duplicate skill name.
+type SkillCollision struct {
+	Name       string
+	WinnerPath string
+	LoserPath  string
+}
+
+// SkillDiagnostics returns the warnings and name collisions produced while
+// discovering skills for this session.
+func (s *Session) SkillDiagnostics() []SkillDiagnostic {
+	out := make([]SkillDiagnostic, 0, len(s.skillDiagnostics))
+	for _, d := range s.skillDiagnostics {
+		item := SkillDiagnostic{Type: d.Type, Message: d.Message, Path: d.Path}
+		if d.Collision != nil {
+			item.Collision = &SkillCollision{
+				Name:       d.Collision.Name,
+				WinnerPath: d.Collision.WinnerPath,
+				LoserPath:  d.Collision.LoserPath,
+			}
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 func (s *Session) SetActiveTools(names []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, n := range names {
 		if n == "codemode" || n == "+codemode" {
-			s.ensureCodemodeLocked()
+			s.ensureCodemodeLocked(false)
 		}
 	}
 	s.tools = selectTools(s.catalog, s.tools, names)
 }
 
-func (s *Session) ensureCodemodeLocked() {
+// ensureCodemodeLocked puts the codemode tool in the catalogue, and in the active
+// set when activate is true. It is idempotent, so a second call only ever adds the
+// missing piece.
+func (s *Session) ensureCodemodeLocked(activate bool) {
 	for _, t := range s.catalog {
 		if t.Name == "codemode" {
+			if activate {
+				s.activateTool(t)
+			}
 			return
 		}
 	}
-	cm := codemode.Tool(s.catalog, s.loadCMStore, s.saveCMStore)
+	cm := codemode.Tool(s.catalog, s.mcpNamespaces(), s.loadCMStore, s.saveCMStore)
 	s.catalog = append(s.catalog, cm)
+	if activate {
+		s.activateTool(cm)
+	}
+}
+
+func (s *Session) activateTool(t agent.AgentTool) {
+	for _, existing := range s.tools {
+		if existing.Name == t.Name {
+			return
+		}
+	}
+	s.tools = append(s.tools, t)
+}
+
+// mcpNamespaces describes every server a script can reach, for
+// describeNamespace() and searchTools({namespace}).
+func (s *Session) mcpNamespaces() []codemode.Namespace {
+	var out []codemode.Namespace
+	for _, srv := range s.servers {
+		names := make([]string, 0, len(srv.Tools))
+		for _, t := range srv.Tools {
+			if t.Exposure == mcp.ExposureHidden {
+				continue
+			}
+			names = append(names, t.Tool.Name)
+		}
+		if len(names) == 0 {
+			continue
+		}
+		out = append(out, codemode.Namespace{
+			Name:         mcp.Namespace(srv.Name),
+			Description:  srv.Description,
+			Instructions: srv.Instructions,
+			Tools:        names,
+		})
+	}
+	return out
+}
+
+// mcpPromptServers lists the servers whose tools are not declared to the model.
+func (s *Session) mcpPromptServers() []prompt.MCPServer {
+	var out []prompt.MCPServer
+	for _, srv := range s.servers {
+		reach := ""
+		switch {
+		case srv.Exposures[mcp.ExposureCodemode]:
+			reach = "codemode"
+		case srv.Exposures[mcp.ExposureDeferred]:
+			reach = "tool_search"
+		}
+		if reach == "" {
+			continue
+		}
+		out = append(out, prompt.MCPServer{
+			Namespace: mcp.Namespace(srv.Name),
+			Summary:   mcpServerSummary(srv),
+			Reach:     reach,
+		})
+	}
+	return out
+}
+
+// mcpServerSummary is Pi's serverSummary: the configured description, else the
+// server's own instructions, reduced to its first line.
+func mcpServerSummary(srv mcp.Connected) string {
+	text := strings.TrimSpace(srv.Description)
+	if text == "" {
+		text = srv.Instructions
+	}
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		text = text[:i]
+	}
+	return strings.TrimSpace(text)
 }
 
 func selectTools(catalog, current []agent.AgentTool, names []string) []agent.AgentTool {

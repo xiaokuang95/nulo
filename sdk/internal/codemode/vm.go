@@ -2,6 +2,7 @@ package codemode
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -14,6 +15,12 @@ import (
 
 const evalAsync = 128
 
+// preludeJS defines the globals a script runs with: tools, ALL_TOOLS,
+// searchTools, text, image, console, store, load and exit.
+//
+//go:embed prelude.js
+var preludeJS string
+
 type jsVM struct {
 	ctx context.Context
 	rt  wazero.Runtime
@@ -24,7 +31,9 @@ type jsVM struct {
 }
 
 func newJSVM(ctx context.Context, h *Host) (*jsVM, error) {
-	rt := wazero.NewRuntime(ctx)
+	// WithCloseOnContextDone lets the script's deadline abort a runaway loop: the
+	// runtime closes the module and the call in flight returns.
+	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true))
 	if _, err := wasi_snapshot_preview1.Instantiate(ctx, rt); err != nil {
 		rt.Close(ctx)
 		return nil, err
@@ -232,31 +241,53 @@ func (h *Host) dispatch(args []string) string {
 		}
 		b, _ := json.Marshal(map[string]any{"ok": res})
 		return string(b)
-	case "store":
+	case "output":
 		if len(args) > 2 {
-			h.mu.Lock()
-			if args[2] == "undefined" || args[2] == "" {
-				delete(h.store, args[1])
-			} else {
-				var v any
-				_ = json.Unmarshal([]byte(args[2]), &v)
-				h.store[args[1]] = v
+			item := OutputItem{Kind: OutputKind(args[1]), Text: args[2]}
+			if item.Kind == OutputImage {
+				item.Data = args[2]
+				item.Text = ""
+				if len(args) > 3 {
+					item.MIME = args[3]
+				}
 			}
-			h.wrote = true
+			h.mu.Lock()
+			h.out = append(h.out, item)
 			h.mu.Unlock()
 		}
 		return "null"
-	case "load":
-		h.mu.Lock()
-		v := h.store[args[1]]
-		h.mu.Unlock()
-		b, _ := json.Marshal(v)
-		return string(b)
-	case "output":
-		if len(args) > 2 {
-			h.mu.Lock()
-			h.out = append(h.out, args[2])
-			h.mu.Unlock()
+	case "search":
+		if len(args) > 1 {
+			return h.search(args[1])
+		}
+		return "[]"
+	case "writes":
+		// The prelude batches store() changes: one entry per key, [key] for a
+		// delete and [key, json] for a write.
+		if len(args) > 1 {
+			var entries [][]json.RawMessage
+			if json.Unmarshal([]byte(args[1]), &entries) == nil {
+				h.mu.Lock()
+				for _, entry := range entries {
+					if len(entry) == 0 {
+						continue
+					}
+					var key string
+					if json.Unmarshal(entry[0], &key) != nil {
+						continue
+					}
+					if len(entry) == 1 {
+						delete(h.store, key)
+					} else {
+						var value any
+						if json.Unmarshal(entry[1], &value) == nil {
+							h.store[key] = value
+						}
+					}
+					h.wrote = true
+				}
+				h.mu.Unlock()
+			}
 		}
 		return "null"
 	case "done":
@@ -277,7 +308,9 @@ type Host struct {
 	store       map[string]any
 	wrote       bool
 	tools       map[string]func(map[string]any) (string, error)
-	out         []string
+	info        map[string]ToolInfo
+	namespaces  []Namespace
+	out         []OutputItem
 	doneOK      bool
 	donePayload string
 }
@@ -292,61 +325,29 @@ func (h *Host) callTool(name string, args map[string]any) (string, error) {
 	return fn(args)
 }
 
-func wrapScript(user string, toolNames []string, descriptions map[string]string) string {
-	var all []string
-	for _, n := range toolNames {
-		d := descriptions[n]
-		all = append(all, fmt.Sprintf("{name:%q,description:%q}", n, d))
-	}
-	var toolAssign strings.Builder
-	for _, n := range toolNames {
-		js := toIdent(n)
-		toolAssign.WriteString(fmt.Sprintf("tools[%q]=tools[%q]=function(args){var r=JSON.parse(nulo_call('call',%q,JSON.stringify(args||{})));if(r.error)throw new Error(r.error);return r.ok;};\n", n, js, n))
-	}
-	return fmt.Sprintf(`
-(function(){
-  "use strict";
-  var tools = {};
-  %s
-  function text(v){ nulo_call("output","text", typeof v==="string"?v:JSON.stringify(v)); }
-  function image(v){ nulo_call("output","image", typeof v==="string"?v:JSON.stringify(v)); }
-  var console = {log:function(){ nulo_call("output","console", Array.prototype.join.call(arguments," ")); },
-    info:function(){ console.log.apply(console, arguments); },
-    warn:function(){ console.log.apply(console, arguments); },
-    error:function(){ console.log.apply(console, arguments); },
-    debug:function(){ console.log.apply(console, arguments); } };
-  function store(k,v){ nulo_call("store", String(k), v===undefined?"undefined":JSON.stringify(v)); }
-  function load(k){ var s=nulo_call("load", String(k)); return s==="null"?undefined:JSON.parse(s); }
-  function exit(){ throw {__nulo_exit:true}; }
-  var ALL_TOOLS = [%s];
-  function searchTools(q){ q=String(q||"").toLowerCase(); return ALL_TOOLS.filter(function(t){return t.name.toLowerCase().indexOf(q)>=0||(t.description||"").toLowerCase().indexOf(q)>=0;}).slice(0,8); }
-  function describeTool(n){ for(var i=0;i<ALL_TOOLS.length;i++) if(ALL_TOOLS[i].name===n) return ALL_TOOLS[i].description; }
-  function describeNamespace(){ return undefined; }
-  var models = { list:function(){return [];} };
-  globalThis.tools = tools;
-  globalThis.text = text;
-  globalThis.image = image;
-  globalThis.console = console;
-  globalThis.store = store;
-  globalThis.load = load;
-  globalThis.exit = exit;
-  globalThis.ALL_TOOLS = ALL_TOOLS;
-  globalThis.searchTools = searchTools;
-  globalThis.describeTool = describeTool;
-  globalThis.describeNamespace = describeNamespace;
-  globalThis.models = models;
-  var __out = [];
-  var _text = text;
-  globalThis.text = function(v){ var s=typeof v==="string"?v:JSON.stringify(v); __out.push(s); _text(v); };
-  globalThis.__nulo_run = async function(){
-    var ret;
-    try { ret = await (async function(){ %s
-    })(); if(ret!==undefined && ret!==null) globalThis.text(ret); nulo_call("done","1", JSON.stringify({text:__out.join("\n")})); }
-    catch(e){ if(e&&e.__nulo_exit){ nulo_call("done","1", JSON.stringify({text:__out.join("\n")})); return; } nulo_call("done","0", String(e && e.message ? e.message : e)); throw e; }
-  };
-  return globalThis.__nulo_run();
-})()
-`, toolAssign.String(), strings.Join(all, ","), user)
+// wrapScript builds the program evaluated for one run: the prelude, then the
+// user's code inside an async function so top-level await works.
+func wrapScript(user, toolsJSON, storeJSON, namespacesJSON string) string {
+	var b strings.Builder
+	b.WriteString(preludeJS)
+	b.WriteString("\n(function(){try{__nulo_init(")
+	b.WriteString(jsString(toolsJSON))
+	b.WriteString(",")
+	b.WriteString(jsString(storeJSON))
+	b.WriteString(",")
+	b.WriteString(jsString(namespacesJSON))
+	b.WriteString(");}catch(e){__nulo_fail(e);return;}(async function(){\n")
+	b.WriteString(user)
+	b.WriteString("\n}).call(globalThis).then(__nulo_succeed,__nulo_fail);})()")
+	return b.String()
+}
+
+// jsString quotes a JSON document as a JavaScript string literal. JSON escapes
+// leave `<`, `>` and `&` alone, and the prelude never evaluates HTML, so plain
+// quoting is enough.
+func jsString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 func toIdent(n string) string {

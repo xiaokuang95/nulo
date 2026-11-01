@@ -111,7 +111,93 @@ type Model struct {
 	ContextWindow int               `json:"contextWindow"`
 	MaxTokens     int               `json:"maxTokens"`
 	Headers       map[string]string `json:"headers,omitempty"`
+	Compat        Compat            `json:"compat,omitempty"`
 	Cost          Cost              `json:"cost"`
+
+	// APIKey is resolved when the model is built, from the provider's apiKey in
+	// models.json, then auth.json, then the environment. It never reaches disk.
+	APIKey string `json:"-"`
+}
+
+// MaxOutputTokens is the request's output-token cap. The caller's value wins,
+// then the model's own, matching Pi's fallback chain.
+func (m Model) MaxOutputTokens(opts StreamOptions) int {
+	if opts.MaxTokens > 0 {
+		return opts.MaxTokens
+	}
+	return m.MaxTokens
+}
+
+// Compat describes verified differences from an API's standard request behavior,
+// mirroring the fields of Pi's models.json "compat" block that nulo acts on. Each
+// flag is a pointer so an unset value is distinguishable from an explicit false,
+// and the accessors below supply Pi's defaults. A model-level value overrides the
+// provider-level one field by field.
+//
+// Pi also documents reasoning-related compat (thinkingFormat,
+// supportsReasoningEffort) and more; nulo does not send reasoning parameters yet,
+// so they are deliberately absent rather than parsed-but-ignored.
+type Compat struct {
+	// MaxTokensField selects max_tokens or max_completion_tokens for
+	// openai-completions. Defaults to "max_tokens".
+	MaxTokensField string `json:"maxTokensField,omitempty"`
+	// SupportsStore sends store:false when the provider accepts the field.
+	SupportsStore *bool `json:"supportsStore,omitempty"`
+	// SupportsDeveloperRole sends the developer role instead of system.
+	SupportsDeveloperRole *bool `json:"supportsDeveloperRole,omitempty"`
+	// SupportsUsageInStreaming requests stream_options.include_usage.
+	SupportsUsageInStreaming *bool `json:"supportsUsageInStreaming,omitempty"`
+	// RequiresToolResultName adds the name field to tool result messages.
+	RequiresToolResultName *bool `json:"requiresToolResultName,omitempty"`
+	// SupportsMaxOutputTokens sends max_output_tokens (openai-responses).
+	SupportsMaxOutputTokens *bool `json:"supportsMaxOutputTokens,omitempty"`
+}
+
+func (c Compat) flag(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
+// TokensField is the body field carrying the output-token cap.
+func (c Compat) TokensField() string {
+	if c.MaxTokensField == "max_completion_tokens" {
+		return "max_completion_tokens"
+	}
+	return "max_tokens"
+}
+
+func (c Compat) Store() bool            { return c.flag(c.SupportsStore, false) }
+func (c Compat) UsageInStreaming() bool { return c.flag(c.SupportsUsageInStreaming, true) }
+func (c Compat) ToolResultName() bool   { return c.flag(c.RequiresToolResultName, false) }
+func (c Compat) MaxOutputTokens() bool  { return c.flag(c.SupportsMaxOutputTokens, true) }
+
+// DeveloperRole reports whether to use the developer role. The default differs
+// per API: openai-responses supports it, most openai-completions endpoints do not.
+func (c Compat) DeveloperRole(def bool) bool { return c.flag(c.SupportsDeveloperRole, def) }
+
+// Override merges other over c, field by field; a field set in other wins.
+func (c Compat) Override(other Compat) Compat {
+	if other.MaxTokensField != "" {
+		c.MaxTokensField = other.MaxTokensField
+	}
+	if other.SupportsStore != nil {
+		c.SupportsStore = other.SupportsStore
+	}
+	if other.SupportsDeveloperRole != nil {
+		c.SupportsDeveloperRole = other.SupportsDeveloperRole
+	}
+	if other.SupportsUsageInStreaming != nil {
+		c.SupportsUsageInStreaming = other.SupportsUsageInStreaming
+	}
+	if other.RequiresToolResultName != nil {
+		c.RequiresToolResultName = other.RequiresToolResultName
+	}
+	if other.SupportsMaxOutputTokens != nil {
+		c.SupportsMaxOutputTokens = other.SupportsMaxOutputTokens
+	}
+	return c
 }
 
 type Message struct {

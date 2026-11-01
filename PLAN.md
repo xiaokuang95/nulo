@@ -82,7 +82,7 @@ _, err = sess.NavigateTree(ctx, entryID, sdk.NavigateTreeOptions{Summarize: true
 - 第一条 user/assistant 才建文件。`InMemory()` 不落盘。
 - header 不是树节点。fork 带 `parentSession`。
 - **写且读**：`session`、`message`、`model_change`、`thinking_level_change`、`session_info`、`compaction`、`branch_summary`、codemode 用的 `custom`（`codemode-store`）。
-- **能读、第一期不生成**：`context_edit`、`usage`、其它 `custom`、`custom_message`、`label`。
+- **能读、第一期不生成**:`context_edit`、其它 `custom`、`custom_message`、`label`。独立的 `usage` 条目(记录非助手消息的用量,如 cache warming,带 `kind`)同样不生成;助手消息自身的 `usage` 随 `message` 条目落盘,详见「三条 API」。
 
 ### 手动压缩
 
@@ -119,27 +119,64 @@ The following is a summary of a branch that this conversation came back from:
 
 ### Skills（`skills`）
 
-Agent Skills 规范。启动只把名片放进 prompt；全文等模型 `read`/`bash` 或 `/skill:name`。
+Agent Skills 规范，**逐条对齐 Pi 的 `skills.ts` + `DefaultResourceLoader`**。启动只把名片放进 prompt；全文等模型 `read`/`bash` 或 `/skill:name`。
 
-发现（递归 `SKILL.md`）：
+发现顺序（即优先级，先加载的重名赢）：
 
-- `~/.nulo/agent/skills`
-- `<cwd>/.nulo/skills`
-- `~/.agents/skills`（用户级，不需要 project trust）
-- cwd 向上的 `.agents/skills`（停在 repo 根；项目级，要 trust）
+1. `<cwd>/.nulo/skills`（项目，要 trust）
+2. cwd 向上的 `.agents/skills`（项目，要 trust；停在 repo 根且包含 repo 根，无层数上限）
+3. `<agentDir>/skills`（用户，不需要 trust）
+4. `~/.agents/skills`（用户，不需要 trust）
+5. 显式 `skillPaths`
 
-frontmatter：`name`、`description`、`disable-model-invocation`。无效字段警告不阻断。重名：先加载的赢。`/skill:name args` 把全文 + 用户参数编进 prompt，即使 `disable-model-invocation`。
+注意顺序是**项目优先于用户**——Pi 的 `resourcePrecedenceRank` 把 project 排在 user 前面，原来的实现是反的。
+
+递归规则：目录里有 `SKILL.md` 就是技能根，**不再往下走**（`references/`、`scripts/` 不会被当成技能扫）；否则递归子目录找 `SKILL.md`，并且**只有根目录**的 `.md` 子女作为独立技能。跳过点开头的条目和 `node_modules`，跟随符号链接，尊重 `.gitignore` / `.ignore` / `.fdignore`。
+
+frontmatter 按 Pi 的方式提取：CRLF 归一、去 BOM、闭合围栏是 offset 3 之后第一个 `\n---`、YAML 从 offset 4 开始、body 两端 trim。YAML 取子集（纯量、单双引号、`|`/`>` 块、注释、bool/number/null），因为 nulo 不消费任何嵌套字段。
+
+校验语义（这是和旧实现差最大的地方）：`name` **不转小写**、缺失时回落目录名；名字非法（字符、64 长度、首尾/连续连字符）**只告警，照样加载**；`description` 缺失或空白才**不加载**；超过 1024 字符告警。`disable-model-invocation` 必须是布尔 `true`（YAML 1.2 里 `yes` 是字符串，所以不生效）。重名保留先加载的，另一个记为 `collision` 诊断（带 winner/loser 路径）；同一文件经符号链接被扫到两次不算碰撞。
+
+名片是 XML：`name` / `description` / `location`，五个字符转义，`disable-model-invocation` 的不出现。**只有存在 `read` 或 `bash` 工具时才输出这一节**，并点名该工具（`indirect` 表示只能经由别的工具读到）。
+
+`/skill:name args` 展开成 `<skill name="…" location="…">` 块 + 一行 `References are relative to <baseDir>.` + 正文（剥 frontmatter），参数接在后面。名字**精确匹配**，未知命令原样穿过。被 `disable-model-invocation` 禁用的技能仍然可以手动调用。
+
+诊断通过 `Session.SkillDiagnostics()` 暴露（Pi 在启动时打印，nulo 没有启动输出通道，交给宿主）。
+
+未做：Pi 的 `settings.skills` 覆盖项与 `--skill` 过滤、`/reload`、`enableSkillCommands`（TUI 命令发现）。
 
 ### MCP（`mcp`）
 
 自研 JSON-RPC 客户端，不用官方 MCP Go SDK。配置：
 
 - 用户：`~/.nulo/agent/mcp.json`
-- 项目：`<cwd>/.nulo/mcp.json`（要 trust；同名覆盖用户项；只有 `enabled`/`exposure` 的条目做 overlay）
+- 项目：`<cwd>/.nulo/mcp.json`（要 trust）
 
-传输：stdio（`command`+`args`）和 streamable HTTP（`url`+`headers`）。拒绝 `sse`。工具名 `mcp__<server>__<tool>`。`enabled: false` 不连。headers/env 支持 `${ENV}`。
+加载语义对齐 Pi 的 `validateMcpServerConfig` / `readConfigFile`：
 
-第一期不做：MCP OAuth 登录流、CLI `nulo mcp add`、资源订阅 UI。Bearer 靠配置里的 env 头。
+- **每个条目单独校验，坏条目只记错误并跳过**，其余照常加载（原来任一错误会让整个 MCP 失败）。错误经 `Session.MCPDiagnostics()` 暴露。
+- 服务器名 `^[A-Za-z0-9_-]+$`；两个名字规范化后同 namespace（`a-b` 与 `a_b`）算冲突，后一个报错。
+- 传输：`url`（`http` / `streamable-http`）或 `command`（`stdio`）；`sse` 明确拒绝；`url` 必须 http(s)；`timeout` 是正数秒。文件 BOM 会剥掉。
+- 项目条目若没有 `command` / `url` / `type`，就是同名全局服务器的 overlay，**只能**设 `enabled` / `exposure` / `toolExposure`；多一个字段报错，找不到基座也报错。凭证（`env` / `headers`）不会从项目文件覆盖。
+
+**工具暴露**：服务器级 `exposure`（默认 `codemode`）+ 工具级 `toolExposure`（精确名优先，其次 `*` 通配；nulo 对通配按名字排序而不是 JSON 声明顺序，只在一条工具同时命中两个通配时有差别）。
+
+| 值 | 行为 |
+|---|---|
+| `codemode`（默认） | 只进 catalog，脚本可调，**不声明给模型** |
+| `deferred` | 只进 catalog，等 `tool_search` 加载后**直接调用** |
+| `direct` | 像内置工具一样声明，脚本也能调 |
+| `hidden` | 哪儿都不给 |
+
+`codemode-deferred` 是 `codemode` 的旧别名；`deferred` 现在是真的另一种暴露，不再降级。
+
+`deferred` 走新加的 `tool_search` 工具（BM25，k1=1.2 / b=0.75，默认 8 条），命中的工具写进激活集，由 agent loop 的 `AfterToolBatch` 钩子在下一次模型调用前生效，并按 `ToolsAdded` 记进 transcript，`/tree` 恢复后仍在。配置里有 `codemode` 时自动开 codemode（`autoEnableCodemode: false` 可关）。`mcp_servers` 提示词节列出所有含 codemode/deferred 的服务器，`Reach` 标 `codemode` 或 `tool_search`。
+
+**工具名**：`mcp__<server>__<tool>`，`[^A-Za-z0-9_]` → `_`；超过 64 字符、或规范化后撞名时，加 8 位 sha256 后缀。
+
+**结果**：文本块逐块保留（正常路径不合并），图片以 image block 透传，`resource_link` 变成一行可读文本，`isError` 变成工具错误标志。文本合计超 20KB 时中间截断，全文落临时文件并在结果里给出路径。
+
+第一期不做：MCP OAuth 登录流、`list_mcp_resources` / `read_mcp_resource` 等资源工具、CLI `nulo mcp add`、资源订阅 UI。Bearer 靠配置里的 env 头。
 
 会话 `session_start` 时连接；`Dispose` 断开。工具失败变成 `isError` 消息。
 
@@ -162,11 +199,13 @@ frontmatter：`name`、`description`、`disable-model-invocation`。无效字段
 | `anthropic-messages` | Messages SSE |
 | `faux` | 测试队列 |
 
-`BuildModel("provider/id")` 读 `models.json`。凭证 `auth.json` 否则 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`。无 key → `stopReason=error`，函数 error 仍 nil。不做 OAuth、官方 SDK、其它云厂商 API。
+`BuildModel("provider/id")` 读 `models.json`。凭证 `auth.json` 否则 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`。无 key → `stopReason=error`,函数 error 仍 nil。不做 OAuth、官方 SDK、其它云厂商 API。
+
+用量与成本三条 API 都解析,填 `Message.Usage`(input / output / cacheRead / cacheWrite / reasoning / totalTokens),再按 `models.json` 的 `cost` 单价算出 `Usage.Cost`。`openai-completions` 请求带 `stream_options.include_usage`,否则流式响应根本不含用量。缓存读取兼容 `prompt_tokens_details.cached_tokens`(OpenAI)、`prompt_cache_hit_tokens`(DeepSeek)、顶层 `cached_tokens`(Kimi)三种拼写,并从 prompt 计数中扣除。**不做分档定价**(`cost.tiers`)。
 
 ### 工具（`tools`）
 
-默认 `read` / `bash` / `edit` / `write`。`noTools` / `tools` / `excludeTools` / `customTools` 与 Pi SDK 同语义。`grep`/`find`/`ls`/`powershell` 第一期不做。同文件 mutation 队列。
+默认 `read` / `bash` / `edit` / `write`;**Windows 上以 `powershell` 取代 `bash`**,即 `read` / `powershell` / `edit` / `write`,因为 Windows 不自带 POSIX shell。`powershell` 语义对齐 Pi:仅 Windows 可用、`-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command`、每轮前置 UTF-8 编码前缀、**tail 截断**(留最后 2000 行 / 50KB,全文落临时文件)、超时 `taskkill /F /T` 杀进程树。`noTools` / `tools` / `excludeTools` / `customTools` 与 Pi SDK 同语义。`grep`/`find`/`ls` 第一期不做。同文件 mutation 队列。
 
 ### 配置
 
@@ -230,6 +269,21 @@ examples/sdk/main.go
 - [x] **11. MCP**：mcp.json、stdio、HTTP、工具注册
 - [x] **12. codemode**：WASM 沙箱、store 落盘、`+codemode` 激活
 - [x] **13. Runtime 换会话** + `examples/sdk`
+
+## 补记(计划定稿后的增补)
+
+计划定稿后才补的三块,记在这里而不是改上面几节——上面的拍板记录保持原样,免得看不清哪条是当初的决定、哪条是后来改的。
+
+- **`powershell` 工具**:「工具」节原写「第一期不做」,后来做了。理由是 nulo 要在 Windows 上真能用,而 Windows 不自带 POSIX shell。落点:`tools/shell.go`(与 Pi 同构的共享 shell 内核)+ `tools/powershell.go`(平台解析与启动参数)。
+- **用量与成本**:JSONL 节原写 `usage`「第一期不生成」,后来发现**内存里也始终是零**——三条 API 都没解析流里的 usage,任何 host 拿到的用量与成本都是假的。现在 `ai/usage.go` 补齐。
+- **`$NULO_CODING_AGENT_SESSION_DIR` 修复**:「配置」表里列了这个覆盖项,但 `runtime` 从未使用它,是死代码。现由 `DefaultSessionDir` + `session.SessionDirIn` 组合生效。
+- **`models.json` 改为 Pi 的 provider 层**:原格式是扁平 `models` 数组、每个模型自带 `provider` / `baseUrl`(没有 provider 层)。现改为 `providers` 映射,provider 级的 `baseUrl` / `api` / `apiKey` / `headers` / `compat` 由模型继承,模型只写差异;`apiKey` 与 header 值支持 `$ENV` / `${ENV}` / `!command` / `$$` `$!` 转义;`compat` 落地了 nulo 会消费的 6 个字段(`maxTokensField` / `supportsStore` / `supportsDeveloperRole` / `supportsUsageInStreaming` / `requiresToolResultName` / `supportsMaxOutputTokens`)。**旧扁平格式不再兼容**,加载时直接报错并附迁移样例。Pi 的 `oauth` / `authHeader` / `inputLimits` / `promptCache` / `samplingParams` / `thinkingLevelMap` / `modelOverrides` 仍未实现(前者本就在砍清单里);`thinkingFormat` 与 `supportsReasoningEffort` 也**故意不解析**——nulo 还没有下发推理参数这条线,解了也无法生效。
+- **MCP 工具暴露**:原来 MCP 工具无差别地直接进激活工具表(等于全 `direct`)。现按 Pi 的 exposure 分流,并把 codemode 沙箱的 `describeNamespace` / `searchTools({namespace})` / 工具描述都补齐;顺带修了 `wrapScript` 把工具描述丢掉——之前 `ALL_TOOLS` 里每个工具的 description 就是它自己的名字,按描述搜索永远无效。
+- **MCP 对齐 Pi**:之前把 `deferred` 降级成 `codemode`、缺 `toolExposure`、任一配置错误会让整个 MCP 失败、项目 overlay 允许改 `description`、工具名不限长也不处理撞名、结果只取 text 且不截断。现按 `dist/core/mcp-servers.js` / `dist/extensions/mcp/{config,tools,index}.js` 补齐，新增 `tool_search`（BM25）与 agent loop 的 `AfterToolBatch` 钩子，让 deferred 工具在下一轮生效并记进 transcript。
+- **skills 改为对齐 Pi**:旧实现有 6 处实质偏差——发现顺序项目/用户反了、没有 SKILL.md 短路递归、不支持根目录独立 .md、名字被强制转小写且非法名直接丢弃、`disable-model-invocation: yes` 被误当 true、`/skill:` 展开没有 `<skill>` 块也没有 baseDir。现按 `dist/core/skills.ts` 重写,补了 YAML 子集解析(`frontmatter.go`)和 gitignore 子集(`ignore.go`),并暴露 `Session.SkillDiagnostics()`。
+- **修掉 skills frontmatter 的引号 bug**:`v = TrimSpace(Trim(v, `"'`))` 先去引号再去空格,而空格让引号不在边缘,于是惯用的 `name: "x"`(冒号后有空格)得到 `"x`,过不了名字校验,技能静默丢失。改为先 TrimSpace 再 Trim。另补了 `sdk/internal/skills` 的直接测试(之前一个都没有)。
+
+验证:`tools/powershell_test.go` 在 Windows 上真跑(含 UTF-8 输出、退出码、空输出、无效超时、超时杀进程树、tail 截断);`ai/usage_test.go` 用 httptest 覆盖三条 API 与三种缓存命名拼写;`sdk/runtime_test.go` 的 `TestSessionDirEnvOverride` 断言会话文件落在 env 指定的根下、且 agent 目录里不再出现 `sessions/`;`ai/models_json_test.go` 覆盖字段继承与覆盖、compat 合并与默认值、插值四形态与转义、旧格式报错、apiKey 不进 JSON、以及三条 API 的 compat 真的改变了请求体。
 
 ## Verification
 

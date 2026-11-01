@@ -10,15 +10,23 @@ import (
 	"time"
 )
 
+// minResponsesOutputTokens is OpenAI's floor for max_output_tokens; smaller values
+// are rejected outright.
+const minResponsesOutputTokens = 16
+
 func StreamOpenAIResponses(ctx context.Context, model Model, tr Transcript, opts StreamOptions) *EventStream {
-	key := LookupAPIKey(model.Provider, "", opts)
+	key := LookupAPIKey(model, "", opts)
 	if key == "" {
 		return errorStream(model, "provider is not configured: "+model.Provider, StopError)
 	}
-	system, msgs := openaiMessages(tr)
+	system, msgs := openaiMessagesWith(tr, openaiMessageOptions{ToolResultName: model.Compat.ToolResultName()})
 	input := make([]map[string]any, 0, len(msgs)+1)
 	if system != "" {
-		input = append(input, map[string]any{"role": "system", "content": system})
+		role := "system"
+		if model.Compat.DeveloperRole(true) {
+			role = "developer"
+		}
+		input = append(input, map[string]any{"role": role, "content": system})
 	}
 	input = append(input, msgs...)
 	body := map[string]any{
@@ -28,6 +36,11 @@ func StreamOpenAIResponses(ctx context.Context, model Model, tr Transcript, opts
 	}
 	if tools := openaiTools(GetCurrentTools(tr.Messages)); len(tools) > 0 {
 		body["tools"] = tools
+	}
+	// Unlike chat completions, this API accepts a cap, so honour the same option
+	// the other two providers take. Some Codex-protocol gateways reject the field.
+	if opts.MaxTokens > 0 && model.Compat.MaxOutputTokens() {
+		body["max_output_tokens"] = max(opts.MaxTokens, minResponsesOutputTokens)
 	}
 	raw, _ := json.Marshal(body)
 	base := strings.TrimRight(model.BaseURL, "/")
@@ -40,7 +53,7 @@ func StreamOpenAIResponses(ctx context.Context, model Model, tr Transcript, opts
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range opts.Headers {
+	for k, v := range RequestHeaders(model, opts) {
 		req.Header.Set(k, v)
 	}
 	return streamHTTP(ctx, model, req, parseOpenAIResponses)
@@ -129,6 +142,12 @@ func parseOpenAIResponses(s *EventStream, model Model, r io.Reader) {
 			}
 		case "response.completed":
 			ensure()
+			if resp, ok := ev["response"].(map[string]any); ok {
+				var f responsesUsageFields
+				if decodeAs(resp["usage"], &f) {
+					partial.Usage = f.toUsage(model)
+				}
+			}
 		case "response.failed":
 			reason = StopError
 		}

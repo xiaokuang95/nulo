@@ -2,6 +2,9 @@ package sdk
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
@@ -40,6 +43,36 @@ func TestRuntimeSwitchRebind(t *testing.T) {
 	}
 	if s2.LastAssistantText() == nil {
 		t.Fatal("s2 empty")
+	}
+}
+
+func TestSessionDirEnvOverride(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(envSessionDir, root)
+
+	p := ai.NewFauxProvider()
+	p.SetResponses(ai.FauxAssistant("x"))
+	agentDir := t.TempDir()
+	svcs, _ := CreateAgentSessionServices(CreateAgentSessionServicesOptions{
+		CWD: "/tmp/proj", AgentDir: agentDir, StreamFn: p.StreamSimple,
+	})
+	rt, _ := NewRuntime(RuntimeOptions{Services: svcs})
+	defer rt.Close()
+	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Dispose()
+	if _, err := sess.Send(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+
+	file := sess.Manager().File()
+	if !strings.HasPrefix(file, root) {
+		t.Fatalf("session file %q is not under %q", file, root)
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, "sessions")); !os.IsNotExist(err) {
+		t.Fatalf("sessions were still written under the agent dir: %v", err)
 	}
 }
 

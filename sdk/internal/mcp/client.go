@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,42 +15,34 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xiaokuang95/nulo/sdk/internal/ai"
 )
 
-type ServerConfig struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args"`
-	Env     map[string]string `json:"env"`
-	CWD     string            `json:"cwd"`
-	URL     string            `json:"url"`
-	Type    string            `json:"type"`
-	Headers map[string]string `json:"headers"`
-	Enabled *bool             `json:"enabled"`
-	Timeout float64           `json:"timeout"`
-}
-
-func (c ServerConfig) on() bool {
-	return c.Enabled == nil || *c.Enabled
-}
-
 type Tool struct {
-	Name        string
-	Description string
-	InputSchema json.RawMessage
-	Server      string
-	call        func(ctx context.Context, args map[string]any) (string, bool, error)
+	Name         string
+	OriginalName string // the name the server knows it by
+	Description  string
+	InputSchema  json.RawMessage
+	Server       string
+	call         func(ctx context.Context, args map[string]any) ([]ai.ContentBlock, bool, error)
 }
 
 type Client struct {
-	name   string
-	cfg    ServerConfig
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	mu     sync.Mutex
-	wait   map[int64]chan response
-	http   *http.Client
-	closed bool
+	name         string
+	cfg          ServerConfig
+	instructions string
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	mu           sync.Mutex
+	wait         map[int64]chan response
+	http         *http.Client
+	closed       bool
 }
+
+// Instructions is the server's own initialize instructions, used as the summary
+// in the mcp_servers system prompt section when no description is configured.
+func (c *Client) Instructions() string { return c.instructions }
 
 func (c *Client) Close() {
 	c.mu.Lock()
@@ -64,6 +58,12 @@ func (c *Client) Close() {
 }
 
 func Connect(ctx context.Context, name string, cfg ServerConfig) (*Client, []Tool, error) {
+	return connect(ctx, name, cfg, nil)
+}
+
+// connect takes the set of tool names already used by other servers, so a
+// sanitized name that would collide gets Pi's hash suffix.
+func connect(ctx context.Context, name string, cfg ServerConfig, taken map[string]bool) (*Client, []Tool, error) {
 	if strings.EqualFold(cfg.Type, "sse") {
 		return nil, nil, fmt.Errorf("mcp sse transport is not supported")
 	}
@@ -83,14 +83,20 @@ func Connect(ctx context.Context, name string, cfg ServerConfig) (*Client, []Too
 		c.Close()
 		return nil, nil, err
 	}
-	if _, err := c.call(ctx, "initialize", map[string]any{
+	rawInit, err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": "2025-03-26",
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "nulo", "version": "0.0.0"},
-	}); err != nil {
+	})
+	if err != nil {
 		c.Close()
 		return nil, nil, err
 	}
+	var initRes struct {
+		Instructions string `json:"instructions"`
+	}
+	_ = json.Unmarshal(rawInit, &initRes)
+	c.instructions = initRes.Instructions
 	_ = c.notify("notifications/initialized", nil)
 	raw, err := c.call(ctx, "tools/list", map[string]any{})
 	if err != nil {
@@ -108,50 +114,61 @@ func Connect(ctx context.Context, name string, cfg ServerConfig) (*Client, []Too
 	var tools []Tool
 	for _, t := range list.Tools {
 		t := t
+		toolName := createMcpToolName(name, t.Name, func(candidate string) bool {
+			return taken != nil && taken[candidate]
+		})
+		if taken != nil {
+			taken[toolName] = true
+		}
 		tools = append(tools, Tool{
-			Name:        mcpToolName(name, t.Name),
-			Description: t.Description,
-			InputSchema: t.InputSchema,
-			Server:      name,
-			call: func(ctx context.Context, args map[string]any) (string, bool, error) {
+			Name:         toolName,
+			OriginalName: t.Name,
+			Description:  t.Description,
+			InputSchema:  t.InputSchema,
+			Server:       name,
+			call: func(ctx context.Context, args map[string]any) ([]ai.ContentBlock, bool, error) {
 				res, err := c.call(ctx, "tools/call", map[string]any{"name": t.Name, "arguments": args})
 				if err != nil {
-					return err.Error(), true, nil
+					return []ai.ContentBlock{ai.TextBlock(err.Error())}, true, nil
 				}
-				var out struct {
-					IsError bool `json:"isError"`
-					Content []struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					} `json:"content"`
-				}
-				_ = json.Unmarshal(res, &out)
-				var texts []string
-				for _, b := range out.Content {
-					if b.Text != "" {
-						texts = append(texts, b.Text)
-					}
-				}
-				return strings.Join(texts, "\n"), out.IsError, nil
+				blocks, isErr := convertResult(res)
+				return blocks, isErr, nil
 			},
 		})
 	}
 	return c, tools, nil
 }
 
-func mcpToolName(server, tool string) string {
-	clean := func(s string) string {
-		var b strings.Builder
-		for _, r := range s {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
-				b.WriteRune(r)
-			} else {
-				b.WriteByte('_')
-			}
+func clean(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
 		}
-		return b.String()
 	}
-	return "mcp__" + clean(server) + "__" + clean(tool)
+	return b.String()
+}
+
+// maxToolNameLength is the provider limit on tool names.
+const maxToolNameLength = 64
+
+// createMcpToolName builds `mcp__<server>__<tool>`, mapping everything outside
+// [A-Za-z0-9_] to "_". A name that is too long, or that another MCP tool already
+// uses after sanitizing, gets a short sha256 suffix.
+func createMcpToolName(server, tool string, isTaken func(string) bool) string {
+	name := clean("mcp__" + server + "__" + tool)
+	if len(name) <= maxToolNameLength && !isTaken(name) {
+		return name
+	}
+	sum := sha256.Sum256([]byte(server + string([]byte{0}) + tool))
+	hash := hex.EncodeToString(sum[:])[:8]
+	prefix := name
+	if limit := maxToolNameLength - len(hash) - 1; len(prefix) > limit {
+		prefix = prefix[:limit]
+	}
+	return prefix + "_" + hash
 }
 
 func (c *Client) initStdio(ctx context.Context) error {

@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,5 +44,30 @@ func TestSystemPromptHasAgentsAndSkills(t *testing.T) {
 	p.SetResponses(ai.FauxAssistant("ok"))
 	if err := sess.Prompt(context.Background(), "/skill:demo run"); err != nil {
 		t.Fatal(err)
+	}
+	// The command expands into a skill block plus the user's request, so the
+	// model sees where the instructions live.
+	proj = sess.Manager().Project()
+	var user *ai.Message
+	for i := range proj.Messages {
+		if proj.Messages[i].Role == "user" {
+			user = &proj.Messages[i]
+		}
+	}
+	if user == nil {
+		t.Fatal("no user message recorded")
+	}
+	var text string
+	if err := json.Unmarshal(user.Content, &text); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, `<skill name="demo"`) {
+		t.Fatalf("skill block missing: %s", text)
+	}
+	if !strings.Contains(text, "BODY") {
+		t.Fatalf("skill body missing: %s", text)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(text), "run") {
+		t.Fatalf("arguments should be appended: %s", text)
 	}
 }
