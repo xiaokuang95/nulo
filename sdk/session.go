@@ -40,7 +40,7 @@ type Session struct {
 	model            ai.Model
 	catalog          []agent.AgentTool
 	tools            []agent.AgentTool
-	listeners        []func(Event)
+	listeners        []*subscription
 	cancel           context.CancelFunc
 	runDone          chan struct{}
 	steering         []ai.Message
@@ -165,26 +165,42 @@ func (s *Session) ensureSystem() {
 	})
 }
 
+// Subscribe adds an event listener and returns a function that removes it.
+//
+// Every event goes to each listener registered on this session when it is
+// emitted, once per listener, so several listeners on one session all see the
+// same events in the same order; a listener removed during a dispatch is not
+// called again. A listener runs on the goroutine driving the session's run and
+// blocks that run while it executes: keep it short and off the session's own
+// Send. Listeners of different sessions may run at the same time, so a listener
+// shared by several sessions must guard its own state; a listener of one
+// session is never called concurrently with itself.
 func (s *Session) Subscribe(fn func(Event)) func() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.listeners = append(s.listeners, fn)
-	i := len(s.listeners) - 1
+	sub := &subscription{fn: fn}
+	s.listeners = append(s.listeners, sub)
+	// The token is the subscription itself, not its index: an index could name a
+	// later listener once the list is reset (Dispose) and refilled.
 	return func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if i < len(s.listeners) {
-			s.listeners[i] = func(Event) {}
-		}
+		sub.fn = nil
 	}
 }
 
+// subscription is one listener. Unsubscribing clears fn instead of removing the
+// entry, so a dispatch already under way keeps its snapshot.
+type subscription struct{ fn func(Event) }
+
 func (s *Session) fire(ev Event) {
 	s.mu.Lock()
-	ls := append([]func(Event){}, s.listeners...)
+	ls := append([]*subscription(nil), s.listeners...)
 	s.mu.Unlock()
-	for _, fn := range ls {
-		fn(ev)
+	for _, sub := range ls {
+		if sub.fn != nil {
+			sub.fn(ev)
+		}
 	}
 }
 

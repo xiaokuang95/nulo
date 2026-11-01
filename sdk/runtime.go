@@ -6,6 +6,9 @@ import (
 	"github.com/xiaokuang95/nulo/sdk/internal/session"
 )
 
+// Runtime owns at most one Session at a time: New, NewSession, SwitchSession
+// and Fork dispose the previous one. Concurrent conversations need one Runtime
+// each; Services may be shared and a Runtime is not safe for concurrent use.
 type Runtime struct {
 	Services *AgentSessionServices
 	session  *Session
