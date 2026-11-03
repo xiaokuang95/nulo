@@ -1,0 +1,8 @@
+# <type>(<scope>): <subject>
+#
+# type: feat | fix | refactor | test | docs | chore | perf | build | ci
+# scope: sdk | session | plugin | codemode | ai | tools
+#
+# <body>
+#
+# BREAKING CHANGE: <description>
