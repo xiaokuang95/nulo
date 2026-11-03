@@ -170,6 +170,9 @@ func streamAssistant(ctx context.Context, current *Context, cfg Config, emit Eve
 		case "start":
 			if ev.Partial != nil {
 				cp := *ev.Partial
+				if cfg.ThinkingLevel != "" {
+					cp.ThinkingLevel = string(cfg.ThinkingLevel)
+				}
 				current.Messages = append(current.Messages, cp)
 				added = true
 				emit(Event{Type: "message_start", Message: &cp})
@@ -199,6 +202,9 @@ func streamAssistant(ctx context.Context, current *Context, cfg Config, emit Eve
 		}
 	}
 	final := stream.Result()
+	if cfg.ThinkingLevel != "" {
+		final.ThinkingLevel = string(cfg.ThinkingLevel)
+	}
 	if added {
 		current.Messages[len(current.Messages)-1] = final
 	} else {

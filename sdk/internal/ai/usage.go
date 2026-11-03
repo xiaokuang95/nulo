@@ -11,9 +11,21 @@ import "encoding/json"
 // already included in the prompt count, so each API has its own mapping below.
 
 // calculateCost fills usage.Cost from the model's per-million-token rates.
-// Model.Cost holds rates; Usage.Cost holds the amounts computed from them.
+// Model.Cost holds rates; Usage.Cost holds the amounts computed from them. The
+// highest tier whose threshold the whole prompt exceeds replaces every base
+// rate, as Pi's calculateCost.
 func calculateCost(model Model, u *Usage) {
 	rates := model.Cost
+	inputRate, outputRate, cacheReadRate, cacheWriteRate := rates.Input, rates.Output, rates.CacheRead, rates.CacheWrite
+	inputTokens := u.Input + u.CacheRead + u.CacheWrite
+	matched := -1.0
+	for _, tier := range rates.Tiers {
+		if float64(inputTokens) > tier.InputTokensAbove && tier.InputTokensAbove > matched {
+			inputRate, outputRate = tier.Input, tier.Output
+			cacheReadRate, cacheWriteRate = tier.CacheRead, tier.CacheWrite
+			matched = tier.InputTokensAbove
+		}
+	}
 	// Anthropic charges double the base input rate for 1h cache writes.
 	longWrite := 0
 	if u.CacheWrite1h != nil {
@@ -21,10 +33,10 @@ func calculateCost(model Model, u *Usage) {
 	}
 	shortWrite := u.CacheWrite - longWrite
 
-	u.Cost.Input = rates.Input / 1e6 * float64(u.Input)
-	u.Cost.Output = rates.Output / 1e6 * float64(u.Output)
-	u.Cost.CacheRead = rates.CacheRead / 1e6 * float64(u.CacheRead)
-	u.Cost.CacheWrite = (rates.CacheWrite*float64(shortWrite) + rates.Input*2*float64(longWrite)) / 1e6
+	u.Cost.Input = inputRate / 1e6 * float64(u.Input)
+	u.Cost.Output = outputRate / 1e6 * float64(u.Output)
+	u.Cost.CacheRead = cacheReadRate / 1e6 * float64(u.CacheRead)
+	u.Cost.CacheWrite = (cacheWriteRate*float64(shortWrite) + inputRate*2*float64(longWrite)) / 1e6
 	u.Cost.Total = u.Cost.Input + u.Cost.Output + u.Cost.CacheRead + u.Cost.CacheWrite
 }
 

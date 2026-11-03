@@ -24,9 +24,9 @@ type Result struct {
 	// Text is Content's text, for callers that only need a string.
 	Text string
 	// Error is the structured error the prelude reported, as JSON.
-	Error   string
-	Store   map[string]any
-	Wrote   bool
+	Error string
+	Store map[string]any
+	Wrote bool
 	// MaxOutputTokens is the script's `// @options` budget, or 0 for the default.
 	MaxOutputTokens int64
 	Elapsed         time.Duration

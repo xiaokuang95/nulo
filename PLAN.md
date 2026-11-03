@@ -64,9 +64,13 @@ err = sess.Prompt(ctx, "hello", opts)
 text := sess.LastAssistantText()
 res, err := sess.Compact(ctx, instructions)
 _, err = sess.NavigateTree(ctx, entryID, sdk.NavigateTreeOptions{Summarize: true})
+err = sess.SetName("...")
+sess.SetModel(model)
+tree := sess.Tree()
+infos, err := rt.ListSessions()
 ```
 
-换会话（Subscribe 必须重绑）：`Runtime.NewSession` / `SwitchSession` / `Fork` / `ImportFromJsonl`。另提供 `CreateAgentSession(...)`。
+换会话（Subscribe 必须重绑）：`Runtime.NewSession` / `SwitchSession` / `ResumeSession` / `Fork` / `ImportFromJsonl`；`ListSessions` / `RenameSession` / `DeleteSession` 管存储。另提供 `CreateAgentSession(...)`。
 
 `error == nil` 不表示模型成功。失败在助手消息的 `StopReason` / `ErrorMessage`。流式再 `Prompt` 必须带 `steer|followUp`。导出 `Steer` / `FollowUp` / `Abort` / `WaitIdle`。
 
@@ -78,11 +82,12 @@ _, err = sess.NavigateTree(ctx, entryID, sdk.NavigateTreeOptions{Summarize: true
 
 权威是树。finalized 消息立刻 append；`prepareRequest` 用投影覆盖。
 
-- 路径：`~/.nulo/agent/sessions/--<cwd 把 / \ : 换成 ->--/<timestamp>_<id>.jsonl`
-- 第一条 user/assistant 才建文件。`InMemory()` 不落盘。
-- header 不是树节点。fork 带 `parentSession`。
-- **写且读**：`session`、`message`、`model_change`、`thinking_level_change`、`session_info`、`compaction`、`branch_summary`、codemode 用的 `custom`（`codemode-store`）。
-- **能读、第一期不生成**:`context_edit`、其它 `custom`、`custom_message`、`label`。独立的 `usage` 条目(记录非助手消息的用量,如 cache warming,带 `kind`)同样不生成;助手消息自身的 `usage` 随 `message` 条目落盘,详见「三条 API」。
+- 路径：`~/.nulo/agent/sessions/--<cwd 把 / \ : 换成 ->--/<timestamp>_<uuidv7>.jsonl`；cwd 先解析成绝对路径，和 Pi 的 `encodeCwdForSessionDir` 一致。
+- 第一条 user/assistant 才建文件。`InMemory()` 不落盘。header 不是树节点；fork 带绝对 `parentSession`。
+- **写且读**：`session`、`message`（含 `bashExecution`）、`model_change`、`thinking_level_change`、`session_info`、`compaction`（`details` / `usage` / `fromHook` / `systemMessage`）、`branch_summary`（`details` / `usage` / `fromHook`）、`custom`、`custom_message`、`label`、`usage`、`context_edit`。助手消息自身的 `usage` 随 `message` 落盘，cache warming 记独立 `usage`（`kind=cache_warm`）。
+- **打开语义同 Pi**：坏 JSON 行跳过、行无长度上限、缺尾换行补 `\n`；v1 补 ID/parent 链并把 `firstKeptEntryIndex` 换成 `firstKeptEntryId`，v2 把 `hookMessage` 改名 `custom`，迁移后写回 v3。常规打开不会重写未知 entry。
+- **投影**：最新 compaction 的 `firstKeptEntryId` 决定保留范围；`context_edit` 替换/删除目标内容；`custom_message` 以 `custom` 角色进上下文，`bashExecution` 渲染成 `Ran ...` 文本（`excludeFromContext` 跳过）。
+- **Session/Runtime**：`Name` / `SetName`、`SetLabel` / `Label`、`Tree`、`SetModel`；新会话写 `model_change`（显式 thinking 档位再写 `thinking_level_change`）；`ResumeSession` 从文件恢复 model/thinking，`SwitchSession` 沿用当前设置；`ListSessions` / `RenameSession` / `DeleteSession`；`ImportFromJsonl` 先复制到 session 目录（重名加 `-N`），不覆盖；`Fork` 只允许已落盘会话。
 
 ### 手动压缩
 
@@ -201,9 +206,9 @@ frontmatter 按 Pi 的方式提取：CRLF 归一、去 BOM、闭合围栏是 off
 | `anthropic-messages` | Messages SSE |
 | `faux` | 测试队列 |
 
-`BuildModel("provider/id")` 读 `models.json`。凭证 `auth.json` 否则 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`。无 key → `stopReason=error`,函数 error 仍 nil。不做 OAuth、官方 SDK、其它云厂商 API。
+`BuildModel("provider/id")` 读 `models.json`;裸 id 按 Pi 当作 `openai/<id>`。凭证顺序与 Pi 一致:请求级 key → `auth.json`(API key 或 OAuth token,过期自动刷新)→ `models.json` 的 `apiKey` → provider 自己的环境变量(未知 provider 不借用 `OPENAI_API_KEY`)。`apiKey` 与 header 的 `$ENV` / `!command` 在每次请求时解析,命令失败报在请求上而不是加载时。无 key → `stopReason=error`,函数 error 仍 nil。不做交互式 OAuth 登录(`auth.json` 里的 OAuth 凭证可直接用并刷新)、官方 SDK、其它云厂商 API。
 
-用量与成本三条 API 都解析,填 `Message.Usage`(input / output / cacheRead / cacheWrite / reasoning / totalTokens),再按 `models.json` 的 `cost` 单价算出 `Usage.Cost`。`openai-completions` 请求带 `stream_options.include_usage`,否则流式响应根本不含用量。缓存读取兼容 `prompt_tokens_details.cached_tokens`(OpenAI)、`prompt_cache_hit_tokens`(DeepSeek)、顶层 `cached_tokens`(Kimi)三种拼写,并从 prompt 计数中扣除。**不做分档定价**(`cost.tiers`)。
+用量与成本三条 API 都解析,填 `Message.Usage`(input / output / cacheRead / cacheWrite / reasoning / totalTokens),再按 `models.json` 的 `cost` 单价算出 `Usage.Cost`。`openai-completions` 请求带 `stream_options.include_usage`,否则流式响应根本不含用量。缓存读取兼容 `prompt_tokens_details.cached_tokens`(OpenAI)、`prompt_cache_hit_tokens`(DeepSeek)、顶层 `cached_tokens`(Kimi)三种拼写,并从 prompt 计数中扣除。`cost.tiers` 按 Pi:整请求 prompt(input + cacheRead + cacheWrite)超过阈值的最高档替换四个基础单价。
 
 ### 工具（`tools`）
 
@@ -279,13 +284,16 @@ examples/sdk/main.go
 - **`powershell` 工具**:「工具」节原写「第一期不做」,后来做了。理由是 nulo 要在 Windows 上真能用,而 Windows 不自带 POSIX shell。落点:`tools/shell.go`(与 Pi 同构的共享 shell 内核)+ `tools/powershell.go`(平台解析与启动参数)。
 - **用量与成本**:JSONL 节原写 `usage`「第一期不生成」,后来发现**内存里也始终是零**——三条 API 都没解析流里的 usage,任何 host 拿到的用量与成本都是假的。现在 `ai/usage.go` 补齐。
 - **`$NULO_CODING_AGENT_SESSION_DIR` 修复**:「配置」表里列了这个覆盖项,但 `runtime` 从未使用它,是死代码。现由 `DefaultSessionDir` + `session.SessionDirIn` 组合生效。
-- **`models.json` 改为 Pi 的 provider 层**:原格式是扁平 `models` 数组、每个模型自带 `provider` / `baseUrl`(没有 provider 层)。现改为 `providers` 映射,provider 级的 `baseUrl` / `api` / `apiKey` / `headers` / `compat` 由模型继承,模型只写差异;`apiKey` 与 header 值支持 `$ENV` / `${ENV}` / `!command` / `$$` `$!` 转义;`compat` 落地了 nulo 会消费的 6 个字段(`maxTokensField` / `supportsStore` / `supportsDeveloperRole` / `supportsUsageInStreaming` / `requiresToolResultName` / `supportsMaxOutputTokens`)。**旧扁平格式不再兼容**,加载时直接报错并附迁移样例。Pi 的 `oauth` / `authHeader` / `inputLimits` / `promptCache` / `samplingParams` / `thinkingLevelMap` / `modelOverrides` 仍未实现(前者本就在砍清单里);`thinkingFormat` 与 `supportsReasoningEffort` 也**故意不解析**——nulo 还没有下发推理参数这条线,解了也无法生效。
+- **`models.json` 改为 Pi 的 provider 层**:原格式是扁平 `models` 数组、每个模型自带 `provider` / `baseUrl`(没有 provider 层)。现改为 `providers` 映射,provider 级的 `baseUrl` / `api` / `apiKey` / `headers` / `compat` 由模型继承,模型只写差异;`apiKey` 与 header 值支持 `$ENV` / `${ENV}` / `!command` / `$$` `$!` 转义;`compat` 落地了 nulo 会消费的 6 个字段(`maxTokensField` / `supportsStore` / `supportsDeveloperRole` / `supportsUsageInStreaming` / `requiresToolResultName` / `supportsMaxOutputTokens`)。**旧扁平格式不再兼容**,加载时直接报错并附迁移样例。`authHeader` 已支持(把 key 额外发成 `Authorization: Bearer`);`thinkingLevelMap` / `thinkingFormat` / `supportsReasoningEffort` / `samplingParams` / `samplingParamsByThinkingLevel` / `inputLimits` / `promptCache` / `modelOverrides` / `oauth` 见下一条补记。
 - **MCP 工具暴露**:原来 MCP 工具无差别地直接进激活工具表(等于全 `direct`)。现按 Pi 的 exposure 分流,并把 codemode 沙箱的 `describeNamespace` / `searchTools({namespace})` / 工具描述都补齐;顺带修了 `wrapScript` 把工具描述丢掉——之前 `ALL_TOOLS` 里每个工具的 description 就是它自己的名字,按描述搜索永远无效。
 - **MCP 对齐 Pi**:之前把 `deferred` 降级成 `codemode`、缺 `toolExposure`、任一配置错误会让整个 MCP 失败、项目 overlay 允许改 `description`、工具名不限长也不处理撞名、结果只取 text 且不截断。现按 `dist/core/mcp-servers.js` / `dist/extensions/mcp/{config,tools,index}.js` 补齐，新增 `tool_search`（BM25）与 agent loop 的 `AfterToolBatch` 钩子，让 deferred 工具在下一轮生效并记进 transcript。
 - **skills 改为对齐 Pi**:旧实现有 6 处实质偏差——发现顺序项目/用户反了、没有 SKILL.md 短路递归、不支持根目录独立 .md、名字被强制转小写且非法名直接丢弃、`disable-model-invocation: yes` 被误当 true、`/skill:` 展开没有 `<skill>` 块也没有 baseDir。现按 `dist/core/skills.ts` 重写,补了 YAML 子集解析(`frontmatter.go`)和 gitignore 子集(`ignore.go`),并暴露 `Session.SkillDiagnostics()`。
 - **修掉 skills frontmatter 的引号 bug**:`v = TrimSpace(Trim(v, `"'`))` 先去引号再去空格,而空格让引号不在边缘,于是惯用的 `name: "x"`(冒号后有空格)得到 `"x`,过不了名字校验,技能静默丢失。改为先 TrimSpace 再 Trim。另补了 `sdk/internal/skills` 的直接测试(之前一个都没有)。
 
-验证:`tools/powershell_test.go` 在 Windows 上真跑(含 UTF-8 输出、退出码、空输出、无效超时、超时杀进程树、tail 截断);`ai/usage_test.go` 用 httptest 覆盖三条 API 与三种缓存命名拼写;`sdk/runtime_test.go` 的 `TestSessionDirEnvOverride` 断言会话文件落在 env 指定的根下、且 agent 目录里不再出现 `sessions/`;`ai/models_json_test.go` 覆盖字段继承与覆盖、compat 合并与默认值、插值四形态与转义、旧格式报错、apiKey 不进 JSON、以及三条 API 的 compat 真的改变了请求体。
+- **`models.json` 对齐 Pi 的解析与认证语义**:之前有 6 处实质偏差——(1) apiKey 优先级是 models.json > auth.json,Pi 是 auth.json > models.json;(2) 未知 provider 回落到 `OPENAI_API_KEY`,等于把 OpenAI 的 key 发给任意网关,Pi 只认 provider 自己的环境变量;(3) `$ENV` 缺失时逐变量替换为空串,Pi 视为整个值 undefined,请求报 "Failed to resolve ... from environment variable";(4) `!command` 在建模时跑一次,Pi 每次请求都跑;(5) header 合并大小写不同就两条都发,且 `null` 无法删除继承的 header;(6) `models.json` 不支持 `//` 注释与尾逗号。现按 Pi 全部修齐,并补了 `authHeader`、`cost.tiers` 分档定价、`input` 默认 `["text"]`、同 provider 重复 model id 后者覆盖、裸 id 默认 `openai`、错误文案 `model not found: provider/id`。
+- **`models.json` 全字段落地**:`thinkingLevelMap` + `thinkingFormat` + `supportsReasoningEffort` / `thinkingTokenBudgetField` 三条 API 真下发(OpenAI 兼容侧覆盖 Pi 的 11 种格式:openai / openrouter / deepseek / zai / qwen / qwen-chat-template / chat-template / baseten / together / ant-ling / string-thinking;Anthropic 走 budget 或 `forceAdaptiveThinking` 的 adaptive+effort);`samplingParams` / `samplingParamsByThinkingLevel` 按「模型 → 档位 → 请求」合入 OpenAI 兼容请求体;`inputLimits.images.resize` 在请求前把 PNG/JPEG 缩到 maxWidth/maxHeight/maxBytes(`maxPer*` / `maxRequestBytes` 只解析,Pi 也还没据此拒绝历史);`modelOverrides` 按字段合并(nulo 没有内建目录,作用于同 provider 的模型);`promptCache` 驱动缓存保温(streaming / idle 两模式,按 Pi 的 $0.05 期望收益门槛,重放请求时 max_tokens=1);`oauth` 支持 `auth.json` 的 OAuth 凭证与 Radius `refresh_token` 换发并回写(交互式浏览器/设备码登录仍未做)。Session 新增 `ThinkingLevel` 启动项、`SetThinkingLevel` / `ThinkingLevel` / `CacheWarming` 模式,档位随 `thinking_level_change` 持久化并在恢复时还原。
+- **sessions 对齐 Pi/PiG**:之前只覆盖自己会写的 7 种 entry，且 session ID 是 `nulo_` 前缀、坏行直接报错、没有 v1/v2 迁移、没有 label/usage/context_edit/custom_message、resume 不恢复 model、import 不复制、缺失路径不能当新会话打开。现按 Pi 的 `session-manager.ts` / PiG `codingagent.Session` 对齐：UUIDv7 session ID、8 位十六进制 entry ID（冲突 100 次后 UUIDv4）、绝对 cwd、全部 entry 类型与字段、Pi 的打开/迁移/跳过坏行语义、名字/标签/usage/context edit、模型恢复、session 列表/重命名/删除、import 复制与 fork 未落盘报错，并让 JSONL 不再 HTML 转义（`<`/`>`/`&` 保持字面，和 `JSON.stringify` 一致）。
+验证:`tools/powershell_test.go` 在 Windows 上真跑(含 UTF-8 输出、退出码、空输出、无效超时、超时杀进程树、tail 截断);`ai/usage_test.go` 用 httptest 覆盖三条 API 与三种缓存命名拼写;`sdk/runtime_test.go` 的 `TestSessionDirEnvOverride` 断言会话文件落在 env 指定的根下、且 agent 目录里不再出现 `sessions/`;`ai/models_json_test.go` 覆盖字段继承与覆盖、compat 合并与默认值、插值四形态与转义、旧格式报错、apiKey 不进 JSON、以及三条 API 的 compat 真的改变了请求体;`ai/models_parity_test.go` 覆盖 header null 删除与大小写合并、apiKey 优先级、逐请求解析、`!command` 失败推迟到请求、`authHeader`、`cost.tiers`;`ai/models_fields_test.go` 覆盖新字段解析与 override 合并、thinking 格式与 `reasoning_effort` 门控、sampling 顺序、图片缩放、promptCache 时序、OAuth 刷新与回写;`sdk/session_models_test.go` 覆盖 thinking 档位持久化/恢复、保温收益判定与 idle 模式真实重放;`session/parity_test.go` / `sdk/session_parity_test.go` 覆盖 entry 投影、迁移、坏行、label/usage/context_edit、session 列表、import/fork、resume 恢复 model/thinking。
 
 ## Verification
 

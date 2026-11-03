@@ -1,6 +1,8 @@
 package session
 
 import (
+	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
@@ -50,7 +52,7 @@ func (m *Manager) Project() Projection {
 	m.mu.Lock()
 	path := buildPath(m.entries, m.leafID)
 	m.mu.Unlock()
-	thinking := "off"
+	thinking := ""
 	var provider, modelID string
 	for _, e := range path {
 		switch e.Type {
@@ -65,12 +67,34 @@ func (m *Manager) Project() Projection {
 		}
 	}
 	ctxEntries := contextEntries(path)
+	edits := map[string]Entry{}
+	for _, e := range ctxEntries {
+		if e.Type == "context_edit" && e.TargetID != "" {
+			edits[e.TargetID] = e
+		}
+	}
 	var msgs []ai.Message
 	for i, e := range ctxEntries {
-		if e.Type == "compaction" && i > 0 {
+		switch e.Type {
+		case "context_edit":
 			continue
+		case "compaction":
+			// Only the newest compaction, first in the context, contributes
+			// a checkpoint; an older one retained in the kept range is state.
+			if i > 0 {
+				continue
+			}
 		}
-		msgs = append(msgs, entryMessages(e)...)
+		messages := entryMessages(e)
+		if edit, ok := edits[e.ID]; ok {
+			messages = applyContextEdit(messages, edit)
+		}
+		for j := range messages {
+			if messages[j].Content == nil {
+				messages[j].Content = ai.EncodeContentBlocks(nil)
+			}
+		}
+		msgs = append(msgs, messages...)
 	}
 	return Projection{Messages: msgs, ThinkingLevel: thinking, ModelProvider: provider, ModelID: modelID}
 }
@@ -117,6 +141,16 @@ func entryMessages(e Entry) []ai.Message {
 			return nil
 		}
 		return []ai.Message{*e.Message}
+	case "custom_message":
+		content := e.Content
+		if content == nil {
+			content = ai.EncodeContentBlocks(nil)
+		}
+		message := ai.Message{Role: "custom", Timestamp: parseISO(e.Timestamp).UnixMilli(), Content: content, CustomType: e.CustomType, Details: e.Details}
+		if e.Display != nil {
+			message.Display = *e.Display
+		}
+		return []ai.Message{message}
 	case "branch_summary":
 		if e.Summary == "" {
 			return nil
@@ -132,6 +166,40 @@ func entryMessages(e Entry) []ai.Message {
 	default:
 		return nil
 	}
+}
+
+// applyContextEdit replaces the content of the messages a context_edit
+// targets, or removes them when the replacement is null.
+func applyContextEdit(messages []ai.Message, edit Entry) []ai.Message {
+	if edit.Replacement == nil {
+		return nil
+	}
+	content := edit.Replacement.Content
+	out := make([]ai.Message, 0, len(messages))
+	for _, message := range messages {
+		switch message.Role {
+		case "user", "custom":
+			message.Content = content
+		case "assistant", "toolResult":
+			if isJSONString(content) {
+				var text string
+				if json.Unmarshal(content, &text) == nil {
+					content = ai.EncodeContentBlocks([]ai.ContentBlock{{Type: "text", Text: text}})
+				}
+			}
+			message.Content = content
+		default:
+			out = append(out, message)
+			continue
+		}
+		out = append(out, message)
+	}
+	return out
+}
+
+func isJSONString(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return len(trimmed) > 0 && trimmed[0] == '"'
 }
 
 func fileTimestamp(t time.Time) string {

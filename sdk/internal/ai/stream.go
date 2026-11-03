@@ -103,7 +103,10 @@ type StreamOptions struct {
 	Env           map[string]string
 	MaxTokens     int
 	ThinkingLevel ThinkingLevel
-	ToolChoice    string
+	// SamplingParams are per-request sampling fields merged over the model's
+	// defaults and its per-level overrides.
+	SamplingParams map[string]any
+	ToolChoice     string
 }
 
 type StreamFn func(ctx context.Context, model Model, transcript Transcript, opts StreamOptions) *EventStream

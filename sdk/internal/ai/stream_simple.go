@@ -28,7 +28,11 @@ func StreamSimple(ctx context.Context, model Model, tr Transcript, opts StreamOp
 func StreamForDir(agentDir string) StreamFn {
 	return func(ctx context.Context, model Model, tr Transcript, opts StreamOptions) *EventStream {
 		if opts.APIKey == "" {
-			opts.APIKey = LookupAPIKey(model, agentDir, opts)
+			key, err := LookupAPIKey(model, agentDir, opts)
+			if err != nil {
+				return errorStream(model, err.Error(), StopError)
+			}
+			opts.APIKey = key
 		}
 		return StreamSimple(ctx, model, tr, opts)
 	}

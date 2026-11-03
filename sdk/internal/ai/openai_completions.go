@@ -12,10 +12,14 @@ import (
 )
 
 func StreamOpenAICompletions(ctx context.Context, model Model, tr Transcript, opts StreamOptions) *EventStream {
-	key := LookupAPIKey(model, "", opts)
+	key, err := LookupAPIKey(model, "", opts)
+	if err != nil {
+		return errorStream(model, err.Error(), StopError)
+	}
 	if key == "" {
 		return errorStream(model, "provider is not configured: "+model.Provider, StopError)
 	}
+	tr = withResizedImages(tr, model.InputLimits)
 	system, msgs := openaiMessagesWith(tr, openaiMessageOptions{ToolResultName: model.Compat.ToolResultName()})
 	if system != "" {
 		role := "system"
@@ -42,6 +46,8 @@ func StreamOpenAICompletions(ctx context.Context, model Model, tr Transcript, op
 	if model.Compat.Store() {
 		body["store"] = false
 	}
+	applyCompletionsThinking(body, model, opts)
+	applySamplingParams(body, model, opts)
 	raw, _ := json.Marshal(body)
 	base := strings.TrimRight(model.BaseURL, "/")
 	if base == "" {
@@ -53,8 +59,15 @@ func StreamOpenAICompletions(ctx context.Context, model Model, tr Transcript, op
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range RequestHeaders(model, opts) {
+	headers, err := RequestHeaders(model, opts)
+	if err != nil {
+		return errorStream(model, err.Error(), StopError)
+	}
+	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	if model.AuthHeader {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	return streamHTTP(ctx, model, req, parseOpenAICompletions)
 }
@@ -72,8 +85,11 @@ type oaiChoice struct {
 }
 
 type oaiDeltaBody struct {
-	Content   string `json:"content"`
-	ToolCalls []struct {
+	Content string `json:"content"`
+	// Reasoning models disagree on the field, and some send a list of parts.
+	ReasoningContent string          `json:"reasoning_content"`
+	Reasoning        json.RawMessage `json:"reasoning"`
+	ToolCalls        []struct {
 		Index    int    `json:"index"`
 		ID       string `json:"id"`
 		Type     string `json:"type"`
@@ -88,6 +104,7 @@ func parseOpenAICompletions(s *EventStream, model Model, r io.Reader) {
 	partial := AssistantMessage(nil, model, StopPending, time.Now().UnixMilli())
 	blocks := []ContentBlock{}
 	textIdx := -1
+	thinkIdx := -1
 	type tcAcc struct {
 		idx  int
 		id   string
@@ -123,6 +140,17 @@ func parseOpenAICompletions(s *EventStream, model Model, r io.Reader) {
 		}
 		if ch.FinishReason != "" {
 			finish = ch.FinishReason
+		}
+		if reasoning := reasoningDelta(ch.Delta); reasoning != "" {
+			if thinkIdx < 0 {
+				thinkIdx = len(blocks)
+				blocks = append(blocks, ContentBlock{Type: "thinking"})
+				partial.Content = EncodeContentBlocks(blocks)
+				s.Push(AssistantMessageEvent{Type: "thinking_start", ContentIndex: thinkIdx, Partial: cloneMsg(&partial)})
+			}
+			blocks[thinkIdx].Thinking += reasoning
+			partial.Content = EncodeContentBlocks(blocks)
+			s.Push(AssistantMessageEvent{Type: "thinking_delta", ContentIndex: thinkIdx, Delta: reasoning, Partial: cloneMsg(&partial)})
 		}
 		if ch.Delta.Content != "" {
 			if textIdx < 0 {
@@ -179,6 +207,9 @@ func parseOpenAICompletions(s *EventStream, model Model, r io.Reader) {
 		s.Push(AssistantMessageEvent{Type: "error", Reason: StopError, Error: &msg})
 		return
 	}
+	if thinkIdx >= 0 {
+		s.Push(AssistantMessageEvent{Type: "thinking_end", ContentIndex: thinkIdx, Content: blocks[thinkIdx].Thinking, Partial: cloneMsg(&partial)})
+	}
 	if textIdx >= 0 {
 		s.Push(AssistantMessageEvent{Type: "text_end", ContentIndex: textIdx, Content: blocks[textIdx].Text, Partial: cloneMsg(&partial)})
 	}
@@ -204,6 +235,32 @@ func parseOpenAICompletions(s *EventStream, model Model, r io.Reader) {
 	partial.Content = EncodeContentBlocks(blocks)
 	partial.StopReason = reason
 	s.Push(AssistantMessageEvent{Type: "done", Reason: reason, Message: cloneMsg(&partial)})
+}
+
+// reasoningDelta reads the reasoning text of a chat chunk: a string, or a list of
+// parts that carries it in "text".
+func reasoningDelta(d oaiDeltaBody) string {
+	if d.ReasoningContent != "" {
+		return d.ReasoningContent
+	}
+	if len(d.Reasoning) == 0 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(d.Reasoning, &text) == nil {
+		return text
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(d.Reasoning, &parts) == nil {
+		var b strings.Builder
+		for _, part := range parts {
+			b.WriteString(part.Text)
+		}
+		return b.String()
+	}
+	return ""
 }
 
 func streamHTTP(ctx context.Context, model Model, req *http.Request, parse func(*EventStream, Model, io.Reader)) *EventStream {

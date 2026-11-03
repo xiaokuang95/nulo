@@ -69,6 +69,11 @@ func FindCutIndex(path []Entry, keepRecent int) int {
 }
 
 func CanCompact(path []Entry) error {
+	return CanCompactWith(path, DefaultKeepRecentTokens)
+}
+
+// CanCompactWith is CanCompact using keepRecent as the retention window.
+func CanCompactWith(path []Entry, keepRecent int) error {
 	if len(path) == 0 {
 		return errNothing
 	}
@@ -76,11 +81,18 @@ func CanCompact(path []Entry) error {
 	if last.Type == "compaction" {
 		return errAlready
 	}
-	cut := FindCutIndex(path, DefaultKeepRecentTokens)
+	cut := FindCutIndex(path, keepRecent)
 	if cut <= 0 {
 		return errNothing
 	}
-	return nil
+	// State-only entries (model or thinking changes) can push the cut past
+	// the start; there must still be a message to summarize.
+	for _, e := range path[:cut] {
+		if e.Type == "message" && e.Message != nil && (e.Message.Role == "user" || e.Message.Role == "assistant") {
+			return nil
+		}
+	}
+	return errNothing
 }
 
 var (

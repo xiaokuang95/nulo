@@ -17,10 +17,18 @@ const storeType = "codemode-store"
 // which includes tools deliberately left out of the model's tool list; namespaces
 // group those tools for describeNamespace() and searchTools({namespace}).
 func Tool(other []agent.AgentTool, namespaces []Namespace, loadStore func() map[string]any, saveStore func(map[string]any)) agent.AgentTool {
+	return ToolWithBudget(other, namespaces, loadStore, saveStore, DefaultInlineBudget)
+}
+
+// ToolWithBudget is Tool with an explicit inline declaration budget.
+func ToolWithBudget(other []agent.AgentTool, namespaces []Namespace, loadStore func() map[string]any, saveStore func(map[string]any), inlineBudget int) agent.AgentTool {
+	if inlineBudget <= 0 {
+		inlineBudget = DefaultInlineBudget
+	}
 	return agent.AgentTool{
 		Tool: ai.Tool{
 			Name:        "codemode",
-			Description: CreateDescription(other, namespaces, DefaultInlineBudget),
+			Description: CreateDescription(other, namespaces, inlineBudget),
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"source":{"type":"string"}},"required":["source"]}`),
 		},
 		Label: "codemode",

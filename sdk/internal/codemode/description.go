@@ -99,7 +99,7 @@ func renderSchemaType(schema any) string {
 	return "unknown"
 }
 
-// renderToolSection is `### \`id\`` followed by the tool's description and the
+// renderToolSection is `### \`id\“ followed by the tool's description and the
 // call the script makes.
 func renderToolSection(tool agent.AgentTool) string {
 	id := toIdent(tool.Name)

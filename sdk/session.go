@@ -37,7 +37,12 @@ type Session struct {
 	mu               sync.Mutex
 	services         *AgentSessionServices
 	manager          *session.Manager
+	settings         *SettingsManager
 	model            ai.Model
+	thinking         ai.ThinkingLevel
+	warmMode         string
+	warmRequest      *warmRequest
+	warm             *warmState
 	catalog          []agent.AgentTool
 	tools            []agent.AgentTool
 	listeners        []*subscription
@@ -66,22 +71,65 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 	s := &Session{
 		services: svcs,
 		manager:  mgr,
+		settings: svcs.SettingsManager,
 		model:    opt.Model,
+		thinking: opt.ThinkingLevel,
 		system:   opt.SystemPrompt,
 	}
+	var configuredTools []string
 	if opt.Tools == nil {
 		s.tools = tools.Default(svcs.CWD)
+		if s.settings != nil {
+			if configured := s.settings.GetDefaultTools(); configured != nil {
+				configuredTools = configured
+				s.tools = filterToolsByName(s.tools, configured)
+			}
+		}
 	} else {
 		s.tools = opt.Tools
 	}
 	if s.model.ID == "" {
 		s.model = ai.DefaultFauxModel()
 	}
+	if s.thinking == "" {
+		// Resuming a session restores the level it recorded, as Pi does.
+		s.thinking = ai.ThinkingLevel(mgr.Project().ThinkingLevel)
+	}
+	if s.thinking != "" {
+		s.thinking = ai.ClampThinkingLevel(s.model, s.thinking)
+	}
+	if opt.CacheWarming == "" && s.settings != nil {
+		opt.CacheWarming = s.settings.GetCacheWarmingMode()
+	}
+	warmMode, err := cacheWarmingMode(opt.CacheWarming)
+	if err != nil {
+		return nil, err
+	}
+	s.warmMode = warmMode
+	if len(mgr.Project().Messages) == 0 {
+		// Pi records the initial model and thinking level on a session with
+		// no messages, so resuming restores both.
+		if s.model.Provider != "" || s.model.ID != "" {
+			if _, err := mgr.AppendModelChange(s.model.Provider, s.model.ID); err != nil {
+				return nil, err
+			}
+		}
+		if s.thinking != "" {
+			if _, err := mgr.AppendThinkingLevel(string(s.thinking)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var skillPaths []string
+	if s.settings != nil {
+		skillPaths = s.settings.GetSkillPaths()
+	}
 	loaded := skills.LoadSkills(skills.LoadOptions{
 		Cwd:             svcs.CWD,
 		AgentDir:        svcs.AgentDir,
 		ProjectTrusted:  svcs.ProjectTrusted,
 		IncludeDefaults: true,
+		SkillPaths:      skillPaths,
 	})
 	s.skills = loaded.Skills
 	s.skillDiagnostics = loaded.Diagnostics
@@ -132,12 +180,39 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 	if deferred {
 		s.tools = append(s.tools, s.toolSearchTool())
 	}
-	// Pi turns codemode on so a codemode-exposed server is actually reachable.
+	// Pi turns codemode on so a codemode-exposed server is actually reachable,
+	// or when defaultTools selects it explicitly.
 	if autoCodemode && cfg.AutoEnableCodemode {
+		s.ensureCodemodeLocked(true)
+	}
+	if containsString(configuredTools, "codemode") {
 		s.ensureCodemodeLocked(true)
 	}
 	s.ensureSystem()
 	return s, nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func filterToolsByName(all []agent.AgentTool, names []string) []agent.AgentTool {
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		wanted[name] = true
+	}
+	out := make([]agent.AgentTool, 0, len(all))
+	for _, tool := range all {
+		if wanted[tool.Name] {
+			out = append(out, tool)
+		}
+	}
+	return out
 }
 
 func (s *Session) ensureSystem() {
@@ -205,6 +280,14 @@ func (s *Session) fire(ev Event) {
 }
 
 func (s *Session) onAgent(ev agent.Event) {
+	switch {
+	case ev.Type == "message_start" && ev.Message != nil && ev.Message.Role == "assistant":
+		// The next request refreshes the cache itself.
+		s.cancelWarm()
+	case ev.Type == "message_end" && ev.Message != nil && ev.Message.Role == "assistant" && hasToolCalls(*ev.Message):
+		// Tool execution may outlive the cache lifetime, so warm while it runs.
+		s.scheduleWarm("streaming")
+	}
 	if ev.Type == "message_end" && ev.Message != nil {
 		if _, err := s.manager.AppendMessage(*ev.Message); err != nil {
 			s.mu.Lock()
@@ -216,6 +299,7 @@ func (s *Session) onAgent(ev agent.Event) {
 	}
 	s.fire(ev)
 	if ev.Type == "agent_end" {
+		s.scheduleWarm("idle")
 		s.fire(agent.Event{Type: "agent_settled", Messages: ev.Messages})
 	}
 }
@@ -254,6 +338,7 @@ func (s *Session) Send(ctx context.Context, text string, opts ...PromptOptions) 
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 	s.mu.Unlock()
+	s.cancelWarm()
 	defer func() {
 		cancel()
 		s.mu.Lock()
@@ -287,11 +372,12 @@ func (s *Session) config() agent.Config {
 	}
 	mgr := s.manager
 	return agent.Config{
-		Model:        s.model,
-		ConvertToLlm: session.ConvertToLlm,
-		StreamFn:     fn,
-		GetSteering:  s.drainSteering,
-		GetFollowUp:  s.drainFollowUp,
+		Model:         s.model,
+		ThinkingLevel: s.thinking,
+		ConvertToLlm:  session.ConvertToLlm,
+		StreamFn:      fn,
+		GetSteering:   s.drainSteering,
+		GetFollowUp:   s.drainFollowUp,
 		AfterToolBatch: func(c *agent.Context) {
 			s.mu.Lock()
 			pending := s.pendingTools
@@ -303,6 +389,7 @@ func (s *Session) config() agent.Config {
 		},
 		PrepareRequest: func(ctx context.Context, c agent.Context, model ai.Model) agent.Context {
 			c.Messages = mgr.Project().Messages
+			s.captureWarmRequest(model, c.Messages)
 			return c
 		},
 	}
@@ -389,6 +476,7 @@ func (s *Session) LastAssistantText() *string {
 }
 
 func (s *Session) Dispose() {
+	s.cancelWarm()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.disposed = true
@@ -414,11 +502,17 @@ func (s *Session) Compact(ctx context.Context, instructions string) (*Compaction
 	}
 	s.fire(Event{Type: "compaction_start"})
 	path := s.manager.Branch()
-	if err := session.CanCompact(path); err != nil {
+	keepRecent := session.DefaultKeepRecentTokens
+	if s.settings != nil {
+		if value, err := s.settings.GetCompactionKeepRecentTokens(s.model); err == nil {
+			keepRecent = value
+		}
+	}
+	if err := session.CanCompactWith(path, keepRecent); err != nil {
 		s.fire(Event{Type: "compaction_end"})
 		return nil, err
 	}
-	cut := session.FindCutIndex(path, session.DefaultKeepRecentTokens)
+	cut := session.FindCutIndex(path, keepRecent)
 	if cut <= 0 || cut >= len(path) {
 		s.fire(Event{Type: "compaction_end"})
 		return nil, session.CanCompact(nil)
@@ -433,7 +527,7 @@ func (s *Session) Compact(ctx context.Context, instructions string) (*Compaction
 	if instructions != "" {
 		prompt = serialized + "\n\nAdditional instructions:\n" + instructions
 	}
-	summary, err := s.summarize(ctx, prompt)
+	summary, usage, err := s.summarize(ctx, prompt)
 	if err != nil {
 		s.fire(Event{Type: "compaction_end"})
 		return nil, err
@@ -443,7 +537,10 @@ func (s *Session) Compact(ctx context.Context, instructions string) (*Compaction
 		tokens += session.EstimateTokens(m)
 	}
 	sys := sessionSys(s.manager.Project())
-	if _, err := s.manager.AppendCompaction(summary, firstKept, tokens, sys); err != nil {
+	if sys != nil {
+		sys.Timestamp = time.Now().UnixMilli()
+	}
+	if _, err := s.manager.AppendCompaction(summary, firstKept, tokens, nil, false, usage, sys); err != nil {
 		s.fire(Event{Type: "compaction_end"})
 		return nil, err
 	}
@@ -458,17 +555,13 @@ func entryMsgs(e session.Entry) []ai.Message {
 	return nil
 }
 
+// sessionSys is the current prompt state at a compaction boundary: Pi
+// replays every system message on the branch into one snapshot.
 func sessionSys(p session.Projection) *ai.Message {
-	for i := range p.Messages {
-		if p.Messages[i].Role == "system" {
-			m := p.Messages[i]
-			return &m
-		}
-	}
-	return nil
+	return ai.GetCurrentSystemMessage(p.Messages)
 }
 
-func (s *Session) summarize(ctx context.Context, serialized string) (string, error) {
+func (s *Session) summarize(ctx context.Context, serialized string) (string, *ai.Usage, error) {
 	fn := s.services.StreamFn
 	if fn == nil {
 		fn = ai.StreamForDir(s.services.AgentDir)
@@ -482,9 +575,9 @@ func (s *Session) summarize(ctx context.Context, serialized string) (string, err
 	}
 	msg := stream.Result()
 	if msg.StopReason == ai.StopError || msg.StopReason == ai.StopAborted {
-		return "", fmt.Errorf("summarize: %s", msg.ErrorMessage)
+		return "", nil, fmt.Errorf("summarize: %s", msg.ErrorMessage)
 	}
-	return ai.MessageText(msg), nil
+	return ai.MessageText(msg), msg.Usage, nil
 }
 
 func (s *Session) NavigateTree(ctx context.Context, entryID string, opt NavigateTreeOptions) error {
@@ -529,13 +622,16 @@ func (s *Session) NavigateTree(ctx context.Context, entryID string, opt Navigate
 	if opt.CustomInstructions != "" {
 		serialized += "\n\n" + opt.CustomInstructions
 	}
-	summary, err := s.summarize(ctx, serialized)
+	summary, usage, err := s.summarize(ctx, serialized)
 	if err != nil {
 		_ = s.manager.SetLeaf(oldLeaf)
 		return err
 	}
+	if oldLeaf == "" {
+		oldLeaf = "root"
+	}
 	// leaf is target; append summary as child of target so it becomes new leaf
-	_, err = s.manager.AppendBranchSummary(oldLeaf, summary)
+	_, err = s.manager.AppendBranchSummary(oldLeaf, summary, nil, false, usage)
 	return err
 }
 
@@ -561,6 +657,24 @@ func commonAncestor(a, b []session.Entry) string {
 }
 
 func (s *Session) Manager() *session.Manager { return s.manager }
+
+// Tree returns the session's branch tree with resolved labels.
+func (s *Session) Tree() []*SessionTreeNode { return s.manager.Tree() }
+
+// SettingsManager returns the settings view this session was created with.
+func (s *Session) SettingsManager() *SettingsManager { return s.settings }
+
+// GetSettingsManager is SettingsManager under an accessor name.
+func (s *Session) GetSettingsManager() *SettingsManager { return s.settings }
+
+// SettingsDiagnostics returns and clears settings load/write failures. Pi
+// reports these at startup; nulo leaves the reporting to the host.
+func (s *Session) SettingsDiagnostics() []SettingsError {
+	if s.settings == nil {
+		return []SettingsError{}
+	}
+	return s.settings.DrainErrors()
+}
 
 // SkillDiagnostic is a warning produced while discovering skills. Pi reports
 // these at startup and carries on; nulo keeps them here for the host to show.
@@ -614,6 +728,103 @@ func (s *Session) SetActiveTools(names []string) {
 	s.tools = selectTools(s.catalog, s.tools, names)
 }
 
+// Name is the latest name recorded for the session, or empty when none is set.
+func (s *Session) Name() string { return s.manager.Name() }
+
+// SetName records a session name as a session_info entry, as Pi's /name does.
+func (s *Session) SetName(name string) error {
+	_, err := s.manager.AppendSessionInfo(name)
+	return err
+}
+
+// SetLabel names an entry; a nil label clears it.
+func (s *Session) SetLabel(targetID string, label *string) error {
+	_, err := s.manager.AppendLabel(targetID, label)
+	return err
+}
+
+// Label returns the latest label for an entry.
+func (s *Session) Label(targetID string) (string, bool) { return s.manager.Label(targetID) }
+
+// Model returns the model the next request uses.
+func (s *Session) Model() Model {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model
+}
+
+// SetModel changes the model for later requests and records a model_change
+// entry, so resuming the session restores it.
+func (s *Session) SetModel(model Model) error {
+	s.mu.Lock()
+	if s.disposed {
+		s.mu.Unlock()
+		return fmt.Errorf("session disposed")
+	}
+	previousThinking := s.thinking
+	s.model = model
+	// Pi's model switch prefers the target model's modelThinkingLevels entry,
+	// then defaultThinkingLevel, then the current level.
+	if s.settings != nil {
+		level := s.settings.GetModelThinkingLevel(model.Provider, model.ID)
+		if level == "" {
+			level = s.settings.GetDefaultThinkingLevel()
+		}
+		if level != "" {
+			s.thinking = ai.ClampThinkingLevel(model, level)
+		} else if s.thinking != "" {
+			s.thinking = ai.ClampThinkingLevel(model, s.thinking)
+		}
+	}
+	thinking := s.thinking
+	s.mu.Unlock()
+	if _, err := s.manager.AppendModelChange(model.Provider, model.ID); err != nil {
+		return err
+	}
+	if thinking != previousThinking && thinking != "" {
+		if _, err := s.manager.AppendThinkingLevel(string(thinking)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ThinkingLevel returns the level the next request uses; empty means no
+// reasoning parameter is sent.
+func (s *Session) ThinkingLevel() ThinkingLevel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.thinking
+}
+
+// SetThinkingLevel records a new thinking level for later requests, clamped to
+// what the model supports. An empty level clears it. The level is persisted as
+// a thinking_level_change entry, so resuming the session restores it.
+func (s *Session) SetThinkingLevel(level ThinkingLevel) error {
+	switch level {
+	case "", ThinkingOff, ThinkingMinimal, ThinkingLow, ThinkingMedium, ThinkingHigh, ThinkingXHigh, ThinkingMax:
+	default:
+		return fmt.Errorf("unknown thinking level %q", level)
+	}
+	s.mu.Lock()
+	if s.disposed {
+		s.mu.Unlock()
+		return fmt.Errorf("session disposed")
+	}
+	if level != "" {
+		level = ai.ClampThinkingLevel(s.model, level)
+	}
+	s.thinking = level
+	s.mu.Unlock()
+	if level == "" {
+		return nil
+	}
+	if _, err := s.manager.AppendThinkingLevel(string(level)); err != nil {
+		return err
+	}
+	return nil
+}
+
 // ensureCodemodeLocked puts the codemode tool in the catalogue, and in the active
 // set when activate is true. It is idempotent, so a second call only ever adds the
 // missing piece.
@@ -626,7 +837,11 @@ func (s *Session) ensureCodemodeLocked(activate bool) {
 			return
 		}
 	}
-	cm := codemode.Tool(s.catalog, s.mcpNamespaces(), s.loadCMStore, s.saveCMStore)
+	budget := codemode.DefaultInlineBudget
+	if s.settings != nil {
+		budget = s.settings.GetCodemodeInlineBudget()
+	}
+	cm := codemode.ToolWithBudget(s.catalog, s.mcpNamespaces(), s.loadCMStore, s.saveCMStore, budget)
 	s.catalog = append(s.catalog, cm)
 	if activate {
 		s.activateTool(cm)

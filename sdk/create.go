@@ -20,6 +20,15 @@ func CreateAgentSession(opt CreateAgentSessionServicesOptions, start SessionStar
 }
 
 func BuildModel(spec string, svcs *AgentSessionServices) (Model, error) {
+	if spec == "" && svcs != nil && svcs.SettingsManager != nil {
+		provider, modelID := svcs.SettingsManager.GetDefaultProvider(), svcs.SettingsManager.GetDefaultModel()
+		if modelID != "" {
+			spec = modelID
+			if provider != "" {
+				spec = provider + "/" + modelID
+			}
+		}
+	}
 	switch spec {
 	case "", "faux", "faux/faux-1":
 		return DefaultFauxModel(), nil

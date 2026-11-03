@@ -116,14 +116,55 @@ func TestLoadProvidersInheritsAndOverrides(t *testing.T) {
 	}
 }
 
-func TestFindModelBareIDAndUnknown(t *testing.T) {
-	p := writeModels(t, `{"providers": {"b": {"api": "openai-completions", "models": [{"id": "m"}]}}}`)
-	m, err := p.FindModel("m")
-	if err != nil || m.Provider != "b" {
+func TestFindModelDefaultsToOpenAI(t *testing.T) {
+	p := writeModels(t, `{"providers": {
+	  "openai": {"api": "openai-completions", "models": [{"id": "gpt"}]},
+	  "b": {"api": "openai-completions", "models": [{"id": "m"}]}}}`)
+	m, err := p.FindModel("gpt")
+	if err != nil || m.Provider != "openai" {
 		t.Fatalf("%+v %v", m, err)
 	}
-	if _, err := p.FindModel("b/nope"); err == nil {
-		t.Fatal("unknown model should error")
+	// Pi reads a bare id as an openai model, not as a search across providers.
+	if _, err := p.FindModel("m"); err == nil || err.Error() != "model not found: openai/m" {
+		t.Fatalf("bare unknown: %v", err)
+	}
+	if _, err := p.FindModel("b/nope"); err == nil || err.Error() != "model not found: b/nope" {
+		t.Fatalf("unknown model: %v", err)
+	}
+}
+
+func TestDuplicateModelIDLastWins(t *testing.T) {
+	p := writeModels(t, `{"providers": {"b": {"api": "openai-completions",
+	  "models": [{"id": "m", "name": "first"}, {"id": "m", "name": "second"}]}}}`)
+	m, err := p.FindModel("b/m")
+	if err != nil || m.Name != "second" {
+		t.Fatalf("%+v %v", m, err)
+	}
+}
+
+func TestModelsJSONCommentsAndTrailingCommas(t *testing.T) {
+	p := writeModels(t, `{
+	  // a provider comment
+	  "providers": {
+	    "b": {
+	      "api": "openai-completions", // inline comment
+	      "models": [
+	        {"id": "m", "name": "M // not a comment",},
+	      ],
+	    },
+	  },
+	}`)
+	m, err := p.FindModel("b/m")
+	if err != nil || m.Name != "M // not a comment" {
+		t.Fatalf("%q %v", m.Name, err)
+	}
+}
+
+func TestFindModelInputDefaultsToText(t *testing.T) {
+	p := writeModels(t, `{"providers": {"b": {"api": "openai-completions", "models": [{"id": "m"}]}}}`)
+	m, err := p.FindModel("b/m")
+	if err != nil || len(m.Input) != 1 || m.Input[0] != "text" {
+		t.Fatalf("%+v %v", m.Input, err)
 	}
 }
 
@@ -167,56 +208,74 @@ func TestResolveConfigValue(t *testing.T) {
 		{"$$NULO_TEST_KEY", "$NULO_TEST_KEY"},
 		{"$!literal", "!literal"},
 		{"a$$b", "a$b"},
-		{"$NULO_TEST_MISSING.", "."},
+		// One unset variable makes the whole value undefined, as Pi's resolver.
+		{"$NULO_TEST_MISSING.", ""},
+		{"prefix-$NULO_TEST_MISSING", ""},
+		// A braced name that is not an identifier stays literal.
+		{"${not a name}", "${not a name}"},
 		{"$", "$"},
 		{"tail$", "tail$"},
+		{"$1abc", "$1abc"},
 	}
 	for _, tc := range cases {
-		got, err := ResolveConfigValue(tc.in)
-		if err != nil {
-			t.Fatalf("%q: %v", tc.in, err)
-		}
-		if got != tc.want {
-			t.Fatalf("ResolveConfigValue(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := resolveConfigValue(tc.in, nil); got != tc.want {
+			t.Fatalf("resolveConfigValue(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 
 	// A leading "!" runs a command; "!" elsewhere stays literal.
-	if got, err := ResolveConfigValue("!echo from-command"); err != nil || got != "from-command" {
-		t.Fatalf("command %q %v", got, err)
+	if got := resolveConfigValue("!echo from-command", nil); got != "from-command" {
+		t.Fatalf("command %q", got)
 	}
-	if got, _ := ResolveConfigValue("not!a!command"); got != "not!a!command" {
+	if got := resolveConfigValue("not!a!command", nil); got != "not!a!command" {
 		t.Fatalf("literal ! %q", got)
 	}
 }
 
-func TestResolveConfigValueCommandFailure(t *testing.T) {
-	if _, err := ResolveConfigValue("!exit 3"); err == nil {
-		t.Fatal("a failing command should error")
+func TestResolveConfigValueErrors(t *testing.T) {
+	t.Setenv("NULO_TEST_KEY", "sekret")
+	// Commands run at request time, so a failure is an error there, not "".
+	if value := resolveConfigValue("!exit 3", nil); value != "" {
+		t.Fatalf("a failing command resolves to the undefined value, got %q", value)
 	}
-	// An empty result is a resolution failure, not an empty string. `rem` is silent
-	// on Windows where `true` is silent on Unix; `echo` is not, because cmd's echo
-	// with no argument reports its own state.
+	if _, err := resolveConfigValueE("!exit 3", "API key for provider \"p\"", nil); err == nil ||
+		!strings.Contains(err.Error(), "shell command") {
+		t.Fatalf("command failure: %v", err)
+	}
+	// An empty result is a successful but empty value.
 	silent := "true"
 	if runtime.GOOS == "windows" {
 		silent = "rem"
 	}
-	if _, err := ResolveConfigValue("!" + silent); err == nil || !strings.Contains(err.Error(), "no output") {
-		t.Fatalf("empty command output should error, got %v", err)
+	if _, err := resolveConfigValueE("!"+silent, "API key for provider \"p\"", nil); err != nil {
+		t.Fatalf("empty command output: %v", err)
+	}
+	_, err := resolveConfigValueE("$NULO_TEST_MISSING", "API key for provider \"p\"", nil)
+	if err == nil || !strings.Contains(err.Error(), "NULO_TEST_MISSING") {
+		t.Fatalf("missing environment variable: %v", err)
+	}
+	// Provider-scoped overrides win over the process environment.
+	if value := resolveConfigValue("$NULO_TEST_KEY", map[string]string{"NULO_TEST_KEY": "override"}); value != "override" {
+		t.Fatalf("env override %q", value)
 	}
 }
 
-func TestResolveHeadersDropsEmpty(t *testing.T) {
+func TestResolveHeaders(t *testing.T) {
 	t.Setenv("NULO_TEST_HDR", "hv")
-	got, err := ResolveHeaders(map[string]string{"A": "$NULO_TEST_HDR", "B": "$NULO_TEST_ABSENT"})
+	got, err := resolveHeaders(map[string]string{"A": "$NULO_TEST_HDR", "Empty": ""}, `model "b/m"`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got["A"] != "hv" {
 		t.Fatalf("%+v", got)
 	}
-	if _, ok := got["B"]; ok {
+	if _, ok := got["Empty"]; ok {
 		t.Fatalf("an empty header should be dropped: %+v", got)
+	}
+	// A missing variable is a resolution failure for a configured header.
+	if _, err := resolveHeaders(map[string]string{"B": "$NULO_TEST_ABSENT"}, `model "b/m"`, nil); err == nil ||
+		!strings.Contains(err.Error(), "NULO_TEST_ABSENT") {
+		t.Fatalf("missing header env: %v", err)
 	}
 }
 
@@ -240,9 +299,18 @@ func TestCompatDefaults(t *testing.T) {
 }
 
 func TestRequestHeadersOverride(t *testing.T) {
-	model := Model{Headers: map[string]string{"X-A": "m", "X-B": "m"}}
-	got := RequestHeaders(model, StreamOptions{Headers: map[string]string{"X-B": "o", "X-C": "o"}})
-	if got["X-A"] != "m" || got["X-B"] != "o" || got["X-C"] != "o" {
+	model := Model{Provider: "p", ID: "m", Headers: map[string]string{"X-A": "m", "X-B": "m"}}
+	got, err := RequestHeaders(model, StreamOptions{Headers: map[string]string{"x-b": "o", "X-C": "o"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["X-A"] != "m" || got["x-b"] != "o" { // case-insensitive override
+		t.Fatalf("%+v", got)
+	}
+	if _, ok := got["X-B"]; ok {
+		t.Fatalf("the overridden spelling must not survive: %+v", got)
+	}
+	if got["X-C"] != "o" {
 		t.Fatalf("%+v", got)
 	}
 }

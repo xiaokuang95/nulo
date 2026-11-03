@@ -1,6 +1,8 @@
 package session
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
@@ -38,10 +40,42 @@ func ConvertToLlm(msgs []ai.Message) []ai.Message {
 			text := BranchSummaryPrefix + m.ContentString() + BranchSummarySuffix
 			out = append(out, ai.UserMessage(text, m.Timestamp))
 		case "custom":
-			out = append(out, ai.UserMessage(m.ContentString(), m.Timestamp))
+			// Pi keeps a custom message's content blocks and gives them the
+			// user role for the provider.
+			content := m.Content
+			if content == nil {
+				content = ai.EncodeContentBlocks(nil)
+			}
+			out = append(out, ai.Message{Role: "user", Timestamp: m.Timestamp, Content: content})
+		case "bashExecution":
+			if m.ExcludeFromContext != nil && *m.ExcludeFromContext {
+				continue
+			}
+			out = append(out, ai.UserMessage(bashExecutionText(m), m.Timestamp))
 		}
 	}
 	return out
+}
+
+// bashExecutionText renders a user shell invocation as Pi's
+// bashExecutionToText does.
+func bashExecutionText(m ai.Message) string {
+	var b strings.Builder
+	b.WriteString("Ran `" + m.Command + "`\n")
+	if m.Output != "" {
+		b.WriteString("```\n" + m.Output + "\n```")
+	} else {
+		b.WriteString("(no output)")
+	}
+	if m.Cancelled {
+		b.WriteString("\n\n(command cancelled)")
+	} else if m.ExitCode != nil && *m.ExitCode != 0 {
+		b.WriteString(fmt.Sprintf("\n\nCommand exited with code %d", *m.ExitCode))
+	}
+	if m.Truncated && m.FullOutputPath != "" {
+		b.WriteString("\n\n[Output truncated. Full output: " + m.FullOutputPath + "]")
+	}
+	return b.String()
 }
 
 func compactionMessage(summary string, ts int64) ai.Message {

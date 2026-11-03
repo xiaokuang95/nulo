@@ -11,10 +11,14 @@ import (
 )
 
 func StreamAnthropicMessages(ctx context.Context, model Model, tr Transcript, opts StreamOptions) *EventStream {
-	key := LookupAPIKey(model, "", opts)
+	key, err := LookupAPIKey(model, "", opts)
+	if err != nil {
+		return errorStream(model, err.Error(), StopError)
+	}
 	if key == "" {
 		return errorStream(model, "provider is not configured: "+model.Provider, StopError)
 	}
+	tr = withResizedImages(tr, model.InputLimits)
 	system, msgs, tools := anthropicPayload(tr)
 	body := map[string]any{
 		"model":      model.ID,
@@ -34,6 +38,7 @@ func StreamAnthropicMessages(ctx context.Context, model Model, tr Transcript, op
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}
+	applyAnthropicThinking(body, model, opts)
 	raw, _ := json.Marshal(body)
 	base := strings.TrimRight(model.BaseURL, "/")
 	if base == "" {
@@ -50,8 +55,15 @@ func StreamAnthropicMessages(ctx context.Context, model Model, tr Transcript, op
 	req.Header.Set("x-api-key", key)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range RequestHeaders(model, opts) {
+	headers, err := RequestHeaders(model, opts)
+	if err != nil {
+		return errorStream(model, err.Error(), StopError)
+	}
+	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	if model.AuthHeader {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	return streamHTTP(ctx, model, req, parseAnthropic)
 }
@@ -61,6 +73,7 @@ func parseAnthropic(s *EventStream, model Model, r io.Reader) {
 	blocks := []ContentBlock{}
 	started := false
 	stop := ""
+	streamErr := ""
 	ensureStart := func() {
 		if !started {
 			started = true
@@ -100,7 +113,14 @@ func parseAnthropic(s *EventStream, model Model, r io.Reader) {
 				partial.Content = EncodeContentBlocks(blocks)
 				s.Push(AssistantMessageEvent{Type: "text_start", ContentIndex: idx, Partial: cloneMsg(&partial)})
 			case "thinking":
-				blocks[idx] = ContentBlock{Type: "thinking"}
+				signature, _ := block["signature"].(string)
+				blocks[idx] = ContentBlock{Type: "thinking", ThinkingSignature: signature}
+				partial.Content = EncodeContentBlocks(blocks)
+				s.Push(AssistantMessageEvent{Type: "thinking_start", ContentIndex: idx, Partial: cloneMsg(&partial)})
+			case "redacted_thinking":
+				// The redacted payload is opaque; it goes back verbatim next turn.
+				data, _ := block["data"].(string)
+				blocks[idx] = ContentBlock{Type: "thinking", Thinking: "[Reasoning redacted]", ThinkingSignature: data, Redacted: true}
 				partial.Content = EncodeContentBlocks(blocks)
 				s.Push(AssistantMessageEvent{Type: "thinking_start", ContentIndex: idx, Partial: cloneMsg(&partial)})
 			case "tool_use":
@@ -128,10 +148,13 @@ func parseAnthropic(s *EventStream, model Model, r io.Reader) {
 				blocks[idx].Thinking += text
 				partial.Content = EncodeContentBlocks(blocks)
 				s.Push(AssistantMessageEvent{Type: "thinking_delta", ContentIndex: idx, Delta: text, Partial: cloneMsg(&partial)})
+			case "signature_delta":
+				signature, _ := delta["signature"].(string)
+				blocks[idx].ThinkingSignature += signature
 			case "input_json_delta":
 				partialJSON, _ := delta["partial_json"].(string)
 				var parsed map[string]any
-				// accumulate in Name? store raw in TextSignature temporarily
+				// The raw JSON accumulates until content_block_stop parses it once.
 				blocks[idx].ArgumentsError += partialJSON
 				_ = json.Unmarshal([]byte(blocks[idx].ArgumentsError), &parsed)
 				if parsed != nil {
@@ -163,6 +186,16 @@ func parseAnthropic(s *EventStream, model Model, r io.Reader) {
 				partial.Content = EncodeContentBlocks(blocks)
 				s.Push(AssistantMessageEvent{Type: "toolcall_end", ContentIndex: idx, ToolCall: &tc, Partial: cloneMsg(&partial)})
 			}
+		case "error":
+			// Mid-stream failures arrive as an error event, not an HTTP status.
+			message := "anthropic stream error"
+			if e, ok := payload["error"].(map[string]any); ok {
+				if m, _ := e["message"].(string); m != "" {
+					message = m
+				}
+			}
+			streamErr = message
+			stop = "error"
 		case "message_delta":
 			if d, ok := payload["delta"].(map[string]any); ok {
 				if sr, _ := d["stop_reason"].(string); sr != "" {
@@ -197,6 +230,9 @@ func parseAnthropic(s *EventStream, model Model, r io.Reader) {
 	partial.Content = EncodeContentBlocks(nonzeroBlocks(blocks))
 	partial.StopReason = reason
 	if reason == StopError {
+		if streamErr != "" {
+			partial.ErrorMessage = streamErr
+		}
 		s.Push(AssistantMessageEvent{Type: "error", Reason: reason, Error: cloneMsg(&partial)})
 		return
 	}

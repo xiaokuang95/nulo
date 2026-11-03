@@ -80,8 +80,9 @@ func TestSessionPathEncoding(t *testing.T) {
 	if got != "--Users-a-b-c--" {
 		t.Fatalf("got %q", got)
 	}
-	dir := SessionDir("/tmp/agent", "/Users/a/b")
-	if filepath.Base(dir) != "--Users-a-b--" {
+	cwd := filepath.Join(t.TempDir(), "a", "b")
+	dir := SessionDir(t.TempDir(), cwd)
+	if filepath.Base(dir) != EncodeCWD(ResolveCWD(cwd)) {
 		t.Fatalf("%s", dir)
 	}
 }
