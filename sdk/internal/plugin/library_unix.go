@@ -44,7 +44,7 @@ func (l *unixLibrary) call(symbol string, args ...uintptr) (uintptr, error) {
 	}
 	r, _, callErr := purego.SyscallN(p, args...)
 	if r == 0 && callErr != 0 {
-		return 0, fmt.Errorf("%s: %w", symbol, callErr)
+		return 0, fmt.Errorf("%s: errno %d", symbol, callErr)
 	}
 	return r, nil
 }
