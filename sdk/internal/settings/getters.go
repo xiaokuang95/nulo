@@ -717,3 +717,15 @@ func (m *Manager) mergedInt(key string, fallback int) int {
 
 // GetCommandPrefix is GetShellCommandPrefix under Settings' name.
 func (m *Manager) GetCommandPrefix() string { return m.GetShellCommandPrefix() }
+
+// Raw returns a copy of the merged settings object. It is the snapshot the
+// embedding host exposes to plugins; callers must not mutate the manager.
+func (m *Manager) Raw() map[string]json.RawMessage {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]json.RawMessage, len(m.merged))
+	for key, value := range m.merged {
+		out[key] = append(json.RawMessage(nil), value...)
+	}
+	return out
+}

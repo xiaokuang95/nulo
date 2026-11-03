@@ -107,6 +107,12 @@ type StreamOptions struct {
 	// defaults and its per-level overrides.
 	SamplingParams map[string]any
 	ToolChoice     string
+
+	// Extension hooks. They run at the provider boundary.
+	OnPayload     func(any) any
+	OnHeaders     func(map[string]string)
+	OnResponse    func(status int, headers map[string]string)
+	OnStreamEvent func(data any)
 }
 
 type StreamFn func(ctx context.Context, model Model, transcript Transcript, opts StreamOptions) *EventStream

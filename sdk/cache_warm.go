@@ -95,6 +95,15 @@ func (s *Session) scheduleWarm(phase string) {
 	if !ok {
 		return
 	}
+	if s.services != nil && s.services.plugins != nil {
+		decision := s.emitPlugin(context.Background(), "cache_warming_decision", map[string]any{
+			"type": "cache_warming_decision", "action": "warm", "phase": phase,
+		})
+		switch fmt.Sprint(decision["action"]) {
+		case "stop", "skip":
+			return
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	state := &warmState{request: request, cancel: cancel}
 	s.mu.Lock()

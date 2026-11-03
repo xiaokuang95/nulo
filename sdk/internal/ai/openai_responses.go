@@ -48,6 +48,13 @@ func StreamOpenAIResponses(ctx context.Context, model Model, tr Transcript, opts
 	}
 	applyResponsesThinking(body, model, opts)
 	applySamplingParams(body, model, opts)
+	if opts.OnPayload != nil {
+		if replacement := opts.OnPayload(body); replacement != nil {
+			if updated, ok := replacement.(map[string]any); ok {
+				body = updated
+			}
+		}
+	}
 	raw, _ := json.Marshal(body)
 	base := strings.TrimRight(model.BaseURL, "/")
 	if base == "" {
@@ -69,7 +76,12 @@ func StreamOpenAIResponses(ctx context.Context, model Model, tr Transcript, opts
 	if model.AuthHeader {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	return streamHTTP(ctx, model, req, parseOpenAIResponses)
+	if opts.OnHeaders != nil {
+		headers := headerMap(req.Header)
+		opts.OnHeaders(headers)
+		applyHeaderMap(req.Header, headers)
+	}
+	return streamHTTP(ctx, model, req, opts, parseOpenAIResponses)
 }
 
 // responsesStream maps the item_id of a streamed output item to its block, so
@@ -122,7 +134,7 @@ func (r *responsesStream) block(b ContentBlock) int {
 	return len(r.blocks) - 1
 }
 
-func parseOpenAIResponses(s *EventStream, model Model, rd io.Reader) {
+func parseOpenAIResponses(s *EventStream, model Model, rd io.Reader, opts StreamOptions) {
 	r := &responsesStream{
 		s: s, model: model,
 		partial:  AssistantMessage(nil, model, StopPending, time.Now().UnixMilli()),
@@ -139,6 +151,9 @@ func parseOpenAIResponses(s *EventStream, model Model, rd io.Reader) {
 		var ev map[string]any
 		if err := json.Unmarshal([]byte(data), &ev); err != nil {
 			return nil
+		}
+		if opts.OnStreamEvent != nil {
+			opts.OnStreamEvent(ev)
 		}
 		typ, _ := ev["type"].(string)
 		itemID, _ := ev["item_id"].(string)

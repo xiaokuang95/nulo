@@ -55,6 +55,7 @@ func checkPackageImports(t *testing.T, importPath string, groups ...[]string) {
 	t.Helper()
 	rel := strings.TrimPrefix(importPath, modulePath+"/")
 	isSDK := rel == "sdk"
+	isPlugin := rel == "plugin" || strings.HasPrefix(rel, "plugin/")
 	isInternal := strings.HasPrefix(rel, "sdk/internal/")
 	internalName := ""
 	if isInternal {
@@ -70,9 +71,16 @@ func checkPackageImports(t *testing.T, importPath string, groups ...[]string) {
 				continue
 			}
 			if imp == modulePath+"/sdk" {
-				if !isSDK && !strings.HasPrefix(rel, "examples/") {
-					t.Errorf("%s must not import %s (only sdk and examples may)", importPath, imp)
+				if !isSDK && !isPlugin && !strings.HasPrefix(rel, "examples/") {
+					t.Errorf("%s must not import %s (only sdk, plugin and examples may)", importPath, imp)
 				}
+				continue
+			}
+			if imp == modulePath+"/plugin" || strings.HasPrefix(imp, modulePath+"/plugin/") {
+				if isPlugin || isSDK || strings.HasPrefix(rel, "examples/") {
+					continue
+				}
+				t.Errorf("%s imports plugin public path %s (only sdk, plugin and examples may)", importPath, imp)
 				continue
 			}
 			if strings.HasPrefix(imp, modulePath+"/sdk/internal/") {
@@ -88,7 +96,7 @@ func checkPackageImports(t *testing.T, importPath string, groups ...[]string) {
 				}
 				continue
 			}
-			if strings.HasPrefix(imp, modulePath+"/") && imp != modulePath+"/sdk" && !strings.HasPrefix(imp, modulePath+"/sdk/internal/") {
+			if strings.HasPrefix(imp, modulePath+"/") && imp != modulePath+"/sdk" && !strings.HasPrefix(imp, modulePath+"/plugin") && !strings.HasPrefix(imp, modulePath+"/sdk/internal/") {
 				if !strings.HasPrefix(rel, "examples/") {
 					t.Errorf("%s imports non-sdk public path %s", importPath, imp)
 				}

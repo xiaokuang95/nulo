@@ -34,12 +34,19 @@ func BuildModel(spec string, svcs *AgentSessionServices) (Model, error) {
 		return DefaultFauxModel(), nil
 	}
 	dir := ""
+	var providers ai.Providers
 	if svcs != nil {
 		dir = svcs.AgentDir
+		if svcs.plugins != nil || len(svcs.dynamicProviders) > 0 {
+			providers = svcs.providerSnapshot()
+		}
 	}
-	providers, err := ai.LoadProviders(dir)
-	if err != nil {
-		return Model{}, err
+	if providers == nil {
+		var err error
+		providers, err = ai.LoadProviders(dir)
+		if err != nil {
+			return Model{}, err
+		}
 	}
 	return providers.FindModel(spec)
 }

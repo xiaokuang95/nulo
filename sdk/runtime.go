@@ -1,6 +1,7 @@
 package sdk
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -28,7 +29,10 @@ func NewRuntime(opt RuntimeOptions) (*Runtime, error) {
 	if opt.Services == nil {
 		return nil, fmt.Errorf("runtime: Services required")
 	}
-	return &Runtime{Services: opt.Services}, nil
+	opt.Services.initPluginMaps()
+	opt.Services.ensurePlugins()
+	opt.Services.pluginRuntime = &Runtime{Services: opt.Services}
+	return opt.Services.pluginRuntime, nil
 }
 
 func (r *Runtime) Session() *Session { return r.session }
@@ -59,15 +63,28 @@ type SessionStartOptions struct {
 	SystemPrompt string
 	Tools        []Tool
 	InMemory     bool
+
+	startReason         string
+	previousSessionFile string
 }
 
 func (r *Runtime) New(opt SessionStartOptions) (*Session, error) {
 	opt = r.withSettingsDefaults(opt)
+	if opt.startReason == "" {
+		opt.startReason = "startup"
+	}
 	return r.replace(r.newManager(opt), opt)
 }
 
 func (r *Runtime) NewSession() (*Session, error) {
 	opt := r.switchOptions()
+	opt.startReason = "new"
+	if r.session != nil {
+		opt.previousSessionFile = r.session.manager.File()
+		if err := r.beforePluginSession("session_before_switch", map[string]any{"type": "session_before_switch", "reason": "new"}); err != nil {
+			return nil, err
+		}
+	}
 	return r.replace(r.newManager(opt), opt)
 }
 
@@ -82,6 +99,11 @@ func (r *Runtime) SwitchSession(path string) (*Session, error) {
 	// The opened session lives on disk, so later NewSession calls must not
 	// inherit an earlier in-memory choice.
 	opt.InMemory = false
+	opt.startReason = "resume"
+	opt.previousSessionFile = path
+	if err := r.beforePluginSession("session_before_switch", map[string]any{"type": "session_before_switch", "reason": "resume", "targetSessionFile": path}); err != nil {
+		return nil, err
+	}
 	return r.replace(mgr, opt)
 }
 
@@ -102,6 +124,11 @@ func (r *Runtime) ResumeSession(path string) (*Session, error) {
 	}
 	opt.ThinkingLevel = ThinkingLevel(projection.ThinkingLevel)
 	opt = r.withSettingsDefaults(opt)
+	opt.startReason = "resume"
+	opt.previousSessionFile = path
+	if err := r.beforePluginSession("session_before_switch", map[string]any{"type": "session_before_switch", "reason": "resume", "targetSessionFile": path}); err != nil {
+		return nil, err
+	}
 	return r.replace(mgr, opt)
 }
 
@@ -115,11 +142,17 @@ func (r *Runtime) Fork() (*Session, error) {
 	if _, err := os.Stat(r.session.manager.File()); err != nil {
 		return nil, fmt.Errorf("this session has not been saved yet; send a message before forking it")
 	}
+	if err := r.beforePluginSession("session_before_fork", map[string]any{"type": "session_before_fork", "entryId": r.session.manager.LeafID(), "position": "at"}); err != nil {
+		return nil, err
+	}
 	child, err := r.session.manager.Fork()
 	if err != nil {
 		return nil, err
 	}
-	return r.replace(child, r.switchOptions())
+	opt := r.switchOptions()
+	opt.startReason = "fork"
+	opt.previousSessionFile = r.session.manager.File()
+	return r.replace(child, opt)
 }
 
 // ImportFromJsonl copies a session log into this runtime's session directory
@@ -280,13 +313,26 @@ func (r *Runtime) defaultModel(manager *SettingsManager) Model {
 	return DefaultFauxModel()
 }
 
+func (r *Runtime) beforePluginSession(event string, data map[string]any) error {
+	if r.session == nil {
+		return nil
+	}
+	result := r.session.emitPlugin(context.Background(), event, data)
+	if cancelled, _ := result["cancel"].(bool); cancelled {
+		return fmt.Errorf("%s cancelled by plugin", event)
+	}
+	return nil
+}
+
 func (r *Runtime) replace(mgr *session.Manager, opt SessionStartOptions) (*Session, error) {
+	old := r.session
 	sess, err := newSession(r.Services, mgr, opt)
 	if err != nil {
 		return nil, err
 	}
-	if r.session != nil {
-		r.session.Dispose()
+	if old != nil {
+		old.shutdown(opt.startReason, mgr.File())
+		old.Dispose()
 	}
 	r.session = sess
 	r.last = opt

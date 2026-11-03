@@ -2,7 +2,9 @@ package sdk
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -65,16 +67,25 @@ type Session struct {
 	toolNamespace  map[string]string
 	pendingTools   []agent.AgentTool
 	mcpDiagnostics []string
+
+	// Native plugins. The host is owned by Services; these maps bind its
+	// registrations to this session.
+	pluginToolByName map[string]pluginToolBinding
+	pluginSystem     string
+	runCtx           context.Context
+	turnIndex        int
+	shutdownSent     bool
 }
 
 func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionStartOptions) (*Session, error) {
 	s := &Session{
-		services: svcs,
-		manager:  mgr,
-		settings: svcs.SettingsManager,
-		model:    opt.Model,
-		thinking: opt.ThinkingLevel,
-		system:   opt.SystemPrompt,
+		services:         svcs,
+		manager:          mgr,
+		settings:         svcs.SettingsManager,
+		model:            opt.Model,
+		thinking:         opt.ThinkingLevel,
+		system:           opt.SystemPrompt,
+		pluginToolByName: map[string]pluginToolBinding{},
 	}
 	var configuredTools []string
 	if opt.Tools == nil {
@@ -124,6 +135,17 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 	if s.settings != nil {
 		skillPaths = s.settings.GetSkillPaths()
 	}
+	if svcs.plugins != nil {
+		s.emitPlugin(context.Background(), "project_trust", map[string]any{
+			"type": "project_trust", "cwd": svcs.CWD, "trusted": svcs.ProjectTrusted,
+		})
+		discovered := s.emitPlugin(context.Background(), "resources_discover", map[string]any{
+			"type": "resources_discover", "cwd": svcs.CWD, "reason": "startup",
+		})
+		for _, path := range stringSliceArg(discovered, "skillPaths") {
+			skillPaths = append(skillPaths, path)
+		}
+	}
 	loaded := skills.LoadSkills(skills.LoadOptions{
 		Cwd:             svcs.CWD,
 		AgentDir:        svcs.AgentDir,
@@ -148,6 +170,17 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 	s.toolExposure = map[string]mcp.Exposure{}
 	s.toolNamespace = map[string]string{}
 	s.mcpDiagnostics = append(s.mcpDiagnostics, cfg.Errors...)
+	// Extension-registered servers join the configured set before connecting.
+	// A file entry of the same name wins, as Pi's mcp.json precedence does.
+	if svcs.plugins != nil {
+		svcs.pluginMu.Lock()
+		for name, server := range svcs.pluginMCP {
+			if _, exists := cfg.Servers[name]; !exists {
+				cfg.Servers[name] = server
+			}
+		}
+		svcs.pluginMu.Unlock()
+	}
 
 	s.servers = mcp.ConnectAll(ctx, cfg.Servers)
 	autoCodemode := false
@@ -176,8 +209,18 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 			}
 		}
 	}
+	// Native plugin tools join the catalogue with Pi's exposure rules.
+	s.bindPluginTools()
+	for _, binding := range s.pluginToolByName {
+		switch binding.spec.ToolExposure() {
+		case "codemode":
+			autoCodemode = true
+		case "deferred":
+			deferred = true
+		}
+	}
 	// Deferred tools are only reachable once tool_search loads them.
-	if deferred {
+	if deferred && !hasTool(s.tools, "tool_search") {
 		s.tools = append(s.tools, s.toolSearchTool())
 	}
 	// Pi turns codemode on so a codemode-exposed server is actually reachable,
@@ -189,7 +232,26 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 		s.ensureCodemodeLocked(true)
 	}
 	s.ensureSystem()
+	svcs.bindPluginSession(s)
+	reason := opt.startReason
+	if reason == "" {
+		reason = "startup"
+	}
+	startData := map[string]any{"type": "session_start", "reason": reason}
+	if opt.previousSessionFile != "" {
+		startData["previousSessionFile"] = opt.previousSessionFile
+	}
+	s.emitPlugin(context.Background(), "session_start", startData)
 	return s, nil
+}
+
+func hasTool(tools []agent.AgentTool, name string) bool {
+	for _, tool := range tools {
+		if tool.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func containsString(values []string, target string) bool {
@@ -280,6 +342,9 @@ func (s *Session) fire(ev Event) {
 }
 
 func (s *Session) onAgent(ev agent.Event) {
+	if replacement := s.pluginOnAgent(ev); replacement != nil && ev.Type == "message_end" {
+		ev.Message = replacement
+	}
 	switch {
 	case ev.Type == "message_start" && ev.Message != nil && ev.Message.Role == "assistant":
 		// The next request refreshes the cache itself.
@@ -300,7 +365,10 @@ func (s *Session) onAgent(ev agent.Event) {
 	s.fire(ev)
 	if ev.Type == "agent_end" {
 		s.scheduleWarm("idle")
-		s.fire(agent.Event{Type: "agent_settled", Messages: ev.Messages})
+		s.pluginBeforeSettle(ev.Messages)
+		settled := agent.Event{Type: "agent_settled", Messages: ev.Messages}
+		s.pluginOnAgent(settled)
+		s.fire(settled)
 	}
 }
 
@@ -344,14 +412,27 @@ func (s *Session) Send(ctx context.Context, text string, opts ...PromptOptions) 
 		s.mu.Lock()
 		s.streaming = false
 		s.cancel = nil
+		s.runCtx = nil
+		s.pluginSystem = ""
 		close(s.runDone)
 		s.runDone = nil
 		s.mu.Unlock()
 	}()
 
+	s.mu.Lock()
+	s.runCtx = ctx
+	s.turnIndex = 0
+	s.pluginSystem = ""
+	s.mu.Unlock()
+	if transformed, ok := s.pluginInput(ctx, text, sourceForPrompt(opt), opt.StreamingBehavior); !ok {
+		return nil, nil
+	} else {
+		text = transformed
+	}
 	if expanded, ok := skills.ExpandCommand(text, s.skills); ok {
 		text = expanded
 	}
+	s.pluginBeforeAgentStart(ctx, text)
 	user := ai.UserMessage(text, time.Now().UnixMilli())
 	cfg := s.config()
 	ac := agent.Context{
@@ -378,6 +459,7 @@ func (s *Session) config() agent.Config {
 		StreamFn:      fn,
 		GetSteering:   s.drainSteering,
 		GetFollowUp:   s.drainFollowUp,
+		StreamOptions: s.pluginStreamOptions(),
 		AfterToolBatch: func(c *agent.Context) {
 			s.mu.Lock()
 			pending := s.pendingTools
@@ -387,8 +469,14 @@ func (s *Session) config() agent.Config {
 				c.Tools = append(c.Tools, pending...)
 			}
 		},
+		BeforeToolCall: func(ctx context.Context, assistant ai.Message, call ai.ContentBlock, args map[string]any) (*agent.BeforeToolCallResult, error) {
+			return s.pluginBeforeToolCall(ctx, assistant, call, args)
+		},
+		AfterToolCall: func(ctx context.Context, assistant ai.Message, call ai.ContentBlock, args map[string]any, result agent.ToolResult, isError bool) (*agent.AfterToolCallResult, error) {
+			return s.pluginAfterToolCall(ctx, assistant, call, args, result, isError)
+		},
 		PrepareRequest: func(ctx context.Context, c agent.Context, model ai.Model) agent.Context {
-			c.Messages = mgr.Project().Messages
+			c.Messages = s.pluginPrepareRequest(ctx, mgr.Project().Messages)
 			s.captureWarmRequest(model, c.Messages)
 			return c
 		},
@@ -475,7 +563,30 @@ func (s *Session) LastAssistantText() *string {
 	return nil
 }
 
+// shutdown emits the session_shutdown event once, with Pi's replacement reason.
+func (s *Session) shutdown(reason, target string) {
+	s.mu.Lock()
+	if s.shutdownSent {
+		s.mu.Unlock()
+		return
+	}
+	s.shutdownSent = true
+	s.mu.Unlock()
+	if reason == "" {
+		reason = "quit"
+	}
+	data := map[string]any{"type": "session_shutdown", "reason": reason}
+	if target != "" {
+		data["targetSessionFile"] = target
+	}
+	s.emitPlugin(context.Background(), "session_shutdown", data)
+}
+
 func (s *Session) Dispose() {
+	s.shutdown("quit", "")
+	if s.services != nil {
+		s.services.unbindPluginSession(s)
+	}
 	s.cancelWarm()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -501,7 +612,61 @@ func (s *Session) Compact(ctx context.Context, instructions string) (*Compaction
 		return nil, err
 	}
 	s.fire(Event{Type: "compaction_start"})
+	completed := false
+	var failure string
+	defer func() {
+		if completed {
+			return
+		}
+		s.emitPlugin(ctx, "session_compact_failed", map[string]any{
+			"type": "session_compact_failed", "reason": "manual", "aborted": false,
+			"errorMessage": failure, "willRetry": false, "fromExtension": false,
+		})
+	}()
 	path := s.manager.Branch()
+	before := s.emitPlugin(ctx, "session_before_compact", map[string]any{
+		"type":               "session_before_compact",
+		"preparation":        map[string]any{"targetId": s.manager.LeafID()},
+		"branchEntries":      sessionEntriesJSON(s),
+		"customInstructions": instructions,
+		"reason":             "manual",
+		"willRetry":          false,
+	})
+	if cancelled, _ := before["cancel"].(bool); cancelled {
+		failure = "compaction cancelled by plugin"
+		s.fire(Event{Type: "compaction_end"})
+		return nil, fmt.Errorf("%s", failure)
+	}
+	if supplied, ok := before["compaction"].(map[string]any); ok {
+		summary, _ := supplied["summary"].(string)
+		firstKept, _ := supplied["firstKeptEntryId"].(string)
+		if summary == "" {
+			failure = "plugin supplied an empty compaction summary"
+			s.fire(Event{Type: "compaction_end"})
+			return nil, fmt.Errorf("%s", failure)
+		}
+		details, _ := json.Marshal(supplied["details"])
+		var usage *ai.Usage
+		if raw, ok := supplied["usage"]; ok {
+			var parsed ai.Usage
+			if data, err := json.Marshal(raw); err == nil && json.Unmarshal(data, &parsed) == nil {
+				usage = &parsed
+			}
+		}
+		entryID, err := s.manager.AppendCompaction(summary, firstKept, 0, details, true, usage, nil)
+		if err != nil {
+			failure = err.Error()
+			s.fire(Event{Type: "compaction_end"})
+			return nil, err
+		}
+		completed = true
+		s.emitPlugin(ctx, "session_compact", map[string]any{
+			"type": "session_compact", "compactionEntry": map[string]any{"id": entryID, "summary": summary, "firstKeptEntryId": firstKept},
+			"fromExtension": true, "reason": "manual", "willRetry": false,
+		})
+		s.fire(Event{Type: "compaction_end"})
+		return &CompactionResult{Summary: summary, FirstKeptEntryID: firstKept}, nil
+	}
 	keepRecent := session.DefaultKeepRecentTokens
 	if s.settings != nil {
 		if value, err := s.settings.GetCompactionKeepRecentTokens(s.model); err == nil {
@@ -509,13 +674,16 @@ func (s *Session) Compact(ctx context.Context, instructions string) (*Compaction
 		}
 	}
 	if err := session.CanCompactWith(path, keepRecent); err != nil {
+		failure = err.Error()
 		s.fire(Event{Type: "compaction_end"})
 		return nil, err
 	}
 	cut := session.FindCutIndex(path, keepRecent)
 	if cut <= 0 || cut >= len(path) {
+		err := session.CanCompact(nil)
+		failure = err.Error()
 		s.fire(Event{Type: "compaction_end"})
-		return nil, session.CanCompact(nil)
+		return nil, err
 	}
 	firstKept := path[cut].ID
 	var toSum []ai.Message
@@ -529,6 +697,7 @@ func (s *Session) Compact(ctx context.Context, instructions string) (*Compaction
 	}
 	summary, usage, err := s.summarize(ctx, prompt)
 	if err != nil {
+		failure = err.Error()
 		s.fire(Event{Type: "compaction_end"})
 		return nil, err
 	}
@@ -540,10 +709,17 @@ func (s *Session) Compact(ctx context.Context, instructions string) (*Compaction
 	if sys != nil {
 		sys.Timestamp = time.Now().UnixMilli()
 	}
-	if _, err := s.manager.AppendCompaction(summary, firstKept, tokens, nil, false, usage, sys); err != nil {
+	entryID, err := s.manager.AppendCompaction(summary, firstKept, tokens, nil, false, usage, sys)
+	if err != nil {
+		failure = err.Error()
 		s.fire(Event{Type: "compaction_end"})
 		return nil, err
 	}
+	completed = true
+	s.emitPlugin(ctx, "session_compact", map[string]any{
+		"type": "session_compact", "compactionEntry": map[string]any{"id": entryID, "summary": summary, "firstKeptEntryId": firstKept},
+		"fromExtension": false, "reason": "manual", "willRetry": false,
+	})
 	s.fire(Event{Type: "compaction_end"})
 	return &CompactionResult{Summary: summary, FirstKeptEntryID: firstKept, TokensBefore: tokens}, nil
 }
@@ -594,10 +770,46 @@ func (s *Session) NavigateTree(ctx context.Context, entryID string, opt Navigate
 	if entryID == oldLeaf {
 		return nil
 	}
+	before := s.emitPlugin(ctx, "session_before_tree", map[string]any{
+		"type": "session_before_tree",
+		"preparation": map[string]any{
+			"targetId": entryID, "oldLeafId": oldLeaf,
+			"userWantsSummary": opt.Summarize, "customInstructions": opt.CustomInstructions,
+		},
+	})
+	if cancelled, _ := before["cancel"].(bool); cancelled {
+		return fmt.Errorf("tree navigation cancelled by plugin")
+	}
+	if custom, ok := before["customInstructions"].(string); ok && custom != "" {
+		opt.CustomInstructions = custom
+	}
 	if err := s.manager.SetLeaf(entryID); err != nil {
 		return err
 	}
+	if summary, ok := before["summary"].(map[string]any); ok {
+		summaryText, _ := summary["summary"].(string)
+		if summaryText != "" {
+			details, _ := json.Marshal(summary["details"])
+			var usage *ai.Usage
+			if raw, ok := summary["usage"]; ok {
+				var parsed ai.Usage
+				if data, err := json.Marshal(raw); err == nil && json.Unmarshal(data, &parsed) == nil {
+					usage = &parsed
+				}
+			}
+			summaryID, err := s.manager.AppendBranchSummary(oldLeaf, summaryText, details, true, usage)
+			if err != nil {
+				return err
+			}
+			s.emitPlugin(ctx, "session_tree", map[string]any{
+				"type": "session_tree", "newLeafId": s.manager.LeafID(), "oldLeafId": oldLeaf,
+				"summaryEntry": map[string]any{"id": summaryID, "summary": summaryText}, "fromExtension": true,
+			})
+			return nil
+		}
+	}
 	if !opt.Summarize {
+		s.emitPlugin(ctx, "session_tree", map[string]any{"type": "session_tree", "newLeafId": entryID, "oldLeafId": oldLeaf})
 		return nil
 	}
 	if s.model.ID == "" {
@@ -631,7 +843,13 @@ func (s *Session) NavigateTree(ctx context.Context, entryID string, opt Navigate
 		oldLeaf = "root"
 	}
 	// leaf is target; append summary as child of target so it becomes new leaf
-	_, err = s.manager.AppendBranchSummary(oldLeaf, summary, nil, false, usage)
+	summaryID, err := s.manager.AppendBranchSummary(oldLeaf, summary, nil, false, usage)
+	if err == nil {
+		s.emitPlugin(ctx, "session_tree", map[string]any{
+			"type": "session_tree", "newLeafId": s.manager.LeafID(), "oldLeafId": oldLeaf,
+			"summaryEntry": map[string]any{"id": summaryID, "summary": summary},
+		})
+	}
 	return err
 }
 
@@ -734,6 +952,9 @@ func (s *Session) Name() string { return s.manager.Name() }
 // SetName records a session name as a session_info entry, as Pi's /name does.
 func (s *Session) SetName(name string) error {
 	_, err := s.manager.AppendSessionInfo(name)
+	if err == nil {
+		s.emitPlugin(context.Background(), "session_info_changed", map[string]any{"type": "session_info_changed", "name": name})
+	}
 	return err
 }
 
@@ -761,6 +982,7 @@ func (s *Session) SetModel(model Model) error {
 		s.mu.Unlock()
 		return fmt.Errorf("session disposed")
 	}
+	previousModel := s.model
 	previousThinking := s.thinking
 	s.model = model
 	// Pi's model switch prefers the target model's modelThinkingLevels entry,
@@ -786,6 +1008,16 @@ func (s *Session) SetModel(model Model) error {
 			return err
 		}
 	}
+	var previous any
+	if previousModel.Provider != "" || previousModel.ID != "" {
+		previous = modelJSON(previousModel)
+	}
+	s.emitPlugin(context.Background(), "model_select", map[string]any{
+		"type":          "model_select",
+		"model":         modelJSON(model),
+		"previousModel": previous,
+		"source":        "set",
+	})
 	return nil
 }
 
@@ -822,6 +1054,10 @@ func (s *Session) SetThinkingLevel(level ThinkingLevel) error {
 	if _, err := s.manager.AppendThinkingLevel(string(level)); err != nil {
 		return err
 	}
+	s.emitPlugin(context.Background(), "thinking_level_select", map[string]any{
+		"type":  "thinking_level_select",
+		"level": string(level),
+	})
 	return nil
 }
 
@@ -861,6 +1097,18 @@ func (s *Session) activateTool(t agent.AgentTool) {
 // describeNamespace() and searchTools({namespace}).
 func (s *Session) mcpNamespaces() []codemode.Namespace {
 	var out []codemode.Namespace
+	if len(s.pluginToolByName) > 0 {
+		names := make([]string, 0, len(s.pluginToolByName))
+		for name, binding := range s.pluginToolByName {
+			if binding.spec.ToolExposure() == "codemode" {
+				names = append(names, name)
+			}
+		}
+		if len(names) > 0 {
+			sort.Strings(names)
+			out = append(out, codemode.Namespace{Name: "plugin", Description: "Native plugin tools", Tools: names})
+		}
+	}
 	for _, srv := range s.servers {
 		names := make([]string, 0, len(srv.Tools))
 		for _, t := range srv.Tools {
@@ -973,4 +1221,11 @@ func (s *Session) loadCMStore() map[string]any {
 
 func (s *Session) saveCMStore(m map[string]any) {
 	_, _ = s.manager.AppendCustom(codemode.StoreType(), codemode.EncodeStore(m))
+}
+
+func sourceForPrompt(opt PromptOptions) string {
+	if opt.Source != "" {
+		return opt.Source
+	}
+	return "rpc"
 }

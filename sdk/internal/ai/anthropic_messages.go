@@ -39,6 +39,13 @@ func StreamAnthropicMessages(ctx context.Context, model Model, tr Transcript, op
 		body["tools"] = tools
 	}
 	applyAnthropicThinking(body, model, opts)
+	if opts.OnPayload != nil {
+		if replacement := opts.OnPayload(body); replacement != nil {
+			if updated, ok := replacement.(map[string]any); ok {
+				body = updated
+			}
+		}
+	}
 	raw, _ := json.Marshal(body)
 	base := strings.TrimRight(model.BaseURL, "/")
 	if base == "" {
@@ -65,10 +72,15 @@ func StreamAnthropicMessages(ctx context.Context, model Model, tr Transcript, op
 	if model.AuthHeader {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	return streamHTTP(ctx, model, req, parseAnthropic)
+	if opts.OnHeaders != nil {
+		headers := headerMap(req.Header)
+		opts.OnHeaders(headers)
+		applyHeaderMap(req.Header, headers)
+	}
+	return streamHTTP(ctx, model, req, opts, parseAnthropic)
 }
 
-func parseAnthropic(s *EventStream, model Model, r io.Reader) {
+func parseAnthropic(s *EventStream, model Model, r io.Reader, opts StreamOptions) {
 	partial := AssistantMessage(nil, model, StopPending, time.Now().UnixMilli())
 	blocks := []ContentBlock{}
 	started := false
@@ -83,6 +95,9 @@ func parseAnthropic(s *EventStream, model Model, r io.Reader) {
 	_ = readSSE(r, func(event, data string) error {
 		var payload map[string]any
 		_ = json.Unmarshal([]byte(data), &payload)
+		if opts.OnStreamEvent != nil {
+			opts.OnStreamEvent(payload)
+		}
 		if event == "" {
 			if t, _ := payload["type"].(string); t != "" {
 				event = t

@@ -48,6 +48,13 @@ func StreamOpenAICompletions(ctx context.Context, model Model, tr Transcript, op
 	}
 	applyCompletionsThinking(body, model, opts)
 	applySamplingParams(body, model, opts)
+	if opts.OnPayload != nil {
+		if replacement := opts.OnPayload(body); replacement != nil {
+			if updated, ok := replacement.(map[string]any); ok {
+				body = updated
+			}
+		}
+	}
 	raw, _ := json.Marshal(body)
 	base := strings.TrimRight(model.BaseURL, "/")
 	if base == "" {
@@ -69,7 +76,12 @@ func StreamOpenAICompletions(ctx context.Context, model Model, tr Transcript, op
 	if model.AuthHeader {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	return streamHTTP(ctx, model, req, parseOpenAICompletions)
+	if opts.OnHeaders != nil {
+		headers := headerMap(req.Header)
+		opts.OnHeaders(headers)
+		applyHeaderMap(req.Header, headers)
+	}
+	return streamHTTP(ctx, model, req, opts, parseOpenAICompletions)
 }
 
 type oaiDelta struct {
@@ -100,7 +112,7 @@ type oaiDeltaBody struct {
 	} `json:"tool_calls"`
 }
 
-func parseOpenAICompletions(s *EventStream, model Model, r io.Reader) {
+func parseOpenAICompletions(s *EventStream, model Model, r io.Reader, opts StreamOptions) {
 	partial := AssistantMessage(nil, model, StopPending, time.Now().UnixMilli())
 	blocks := []ContentBlock{}
 	textIdx := -1
@@ -121,6 +133,11 @@ func parseOpenAICompletions(s *EventStream, model Model, r io.Reader) {
 		var d oaiDelta
 		if err := json.Unmarshal([]byte(data), &d); err != nil {
 			return nil
+		}
+		if opts.OnStreamEvent != nil {
+			var eventData any
+			_ = json.Unmarshal([]byte(data), &eventData)
+			opts.OnStreamEvent(eventData)
 		}
 		if !started {
 			started = true
@@ -263,7 +280,7 @@ func reasoningDelta(d oaiDeltaBody) string {
 	return ""
 }
 
-func streamHTTP(ctx context.Context, model Model, req *http.Request, parse func(*EventStream, Model, io.Reader)) *EventStream {
+func streamHTTP(ctx context.Context, model Model, req *http.Request, opts StreamOptions, parse func(*EventStream, Model, io.Reader, StreamOptions)) *EventStream {
 	s := NewEventStream()
 	go func() {
 		defer s.End(nil)
@@ -283,12 +300,15 @@ func streamHTTP(ctx context.Context, model Model, req *http.Request, parse func(
 			return
 		}
 		defer resp.Body.Close()
+		if opts.OnResponse != nil {
+			opts.OnResponse(resp.StatusCode, headerMap(resp.Header))
+		}
 		if resp.StatusCode >= 300 {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			s.Push(AssistantMessageEvent{Type: "error", Reason: StopError, Error: errMsg(model, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, b), StopError)})
 			return
 		}
-		parse(s, model, resp.Body)
+		parse(s, model, resp.Body, opts)
 	}()
 	return s
 }
@@ -297,4 +317,27 @@ func errMsg(model Model, text string, reason StopReason) *Message {
 	m := AssistantMessage(nil, model, reason, time.Now().UnixMilli())
 	m.ErrorMessage = text
 	return &m
+}
+
+func headerMap(header http.Header) map[string]string {
+	out := make(map[string]string, len(header))
+	for key, values := range header {
+		out[key] = strings.Join(values, ", ")
+	}
+	return out
+}
+
+func applyHeaderMap(header http.Header, values map[string]string) {
+	for key := range header {
+		if _, ok := values[key]; !ok {
+			header.Del(key)
+		}
+	}
+	for key, value := range values {
+		if value == "" {
+			header.Del(key)
+			continue
+		}
+		header.Set(key, value)
+	}
 }

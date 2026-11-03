@@ -62,6 +62,9 @@ func (e Exposure) Indirect() bool { return e.Searchable() }
 // serverNameRe is Pi's server name rule.
 var serverNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
+// ValidServerName reports whether name obeys Pi's server-name rule.
+func ValidServerName(name string) bool { return serverNameRe.MatchString(name) }
+
 // ServerConfig is one validated entry of the `mcpServers` object.
 type ServerConfig struct {
 	Command      string            `json:"command,omitempty"`
