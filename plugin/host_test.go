@@ -162,3 +162,30 @@ func TestDiscoverManifest(t *testing.T) {
 		t.Fatalf("libs=%v", libs)
 	}
 }
+
+func TestDiscoverProtocolManifest(t *testing.T) {
+	dir := t.TempDir()
+	manifest := `{"name":"proto","version":"1","protocol":"stdio","command":"./proto-plugin.exe","args":["--stdio"]}`
+	path := filepath.Join(dir, "plugin.json")
+	if err := os.WriteFile(path, []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := Discover(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].Kind != SourceProtocol || sources[0].Path != path {
+		t.Fatalf("sources=%+v", sources)
+	}
+	badDir := filepath.Join(dir, "bad")
+	if err := os.Mkdir(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(badDir, "plugin.json")
+	if err := os.WriteFile(bad, []byte(`{"name":"x","protocol":"http","command":"x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Discover(bad); err == nil || !strings.Contains(err.Error(), "unsupported plugin protocol") {
+		t.Fatalf("err=%v", err)
+	}
+}

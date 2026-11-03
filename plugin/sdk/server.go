@@ -18,6 +18,7 @@ type server struct {
 	started          bool
 	ready            bool
 	hostCallPtr      uintptr
+	hostCallFn       func([]byte) ([]byte, error)
 	hostInfo         map[string]any
 	handlers         map[string][]Handler
 	busHandlers      map[string][]func(any)
@@ -58,55 +59,7 @@ func (s *server) serveNamed(name, version string, factory Factory) {
 // Init is the Go half of NuloPluginInit. Plugin main packages wrap it with the
 // cgo export; see the package documentation.
 func Init(hostInfo string, hostCall uintptr) (result string) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			reg := plugin.Registration{
-				APIVersion: plugin.APIVersion,
-				Name:       current.name,
-				Version:    current.version,
-				Error:      fmt.Sprint(recovered),
-			}
-			raw, _ := json.Marshal(reg)
-			result = string(raw)
-		}
-	}()
-	current.dispatchMu.Lock()
-	defer current.dispatchMu.Unlock()
-	current.hostCallPtr = hostCall
-	_ = json.Unmarshal([]byte(hostInfo), &current.hostInfo)
-	current.mu.Lock()
-	factory := current.factory
-	current.ready = false
-	current.handlers = map[string][]Handler{}
-	current.busHandlers = map[string][]func(any){}
-	current.tools = map[string]*toolEntry{}
-	current.commands = map[string]*commandEntry{}
-	current.shortcuts = nil
-	current.shortcutHandlers = map[string]func(*Context) error{}
-	current.flags = map[string]plugin.FlagSpec{}
-	current.flagValues = map[string]any{}
-	current.renderers = nil
-	current.mu.Unlock()
-	api := newAPI(current)
-	if factory != nil {
-		factory(api)
-	}
-	current.mu.Lock()
-	current.ready = true
-	current.mu.Unlock()
-	reg := api.registration()
-	if reg.Name == "" {
-		reg.Name = "unnamed"
-	}
-	if reg.Version == "" {
-		reg.Version = current.version
-	}
-	current.mu.Lock()
-	current.name = reg.Name
-	if current.version == "" {
-		current.version = reg.Version
-	}
-	current.mu.Unlock()
+	reg := current.initialize(hostInfo, hostCall, nil)
 	raw, err := json.Marshal(reg)
 	if err != nil {
 		fallback, _ := json.Marshal(plugin.Registration{APIVersion: plugin.APIVersion, Name: reg.Name, Error: err.Error()})
@@ -115,22 +68,77 @@ func Init(hostInfo string, hostCall uintptr) (result string) {
 	return string(raw)
 }
 
-// Call is the Go half of NuloPluginCall.
-func Call(request string) (result string) {
+// initialize resets the plugin and runs its factory. It is shared by the C ABI
+// and the stdio protocol runtime. hostCallFn is nil for the C ABI.
+func (s *server) initialize(hostInfo string, hostCall uintptr, hostCallFn func([]byte) ([]byte, error)) (reg plugin.Registration) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			raw, _ := json.Marshal(plugin.InvokeResult{Error: fmt.Sprint(recovered)})
-			result = string(raw)
+			reg = plugin.Registration{
+				APIVersion: plugin.APIVersion,
+				Name:       s.name,
+				Version:    s.version,
+				Error:      fmt.Sprint(recovered),
+			}
 		}
 	}()
-	// A handler may call back into the host, and the host may emit another
-	// event before the first call returns. Reentrant calls therefore must not
-	// take dispatchMu; Init still does to keep reloads atomic.
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	s.hostCallPtr = hostCall
+	s.hostCallFn = hostCallFn
+	_ = json.Unmarshal([]byte(hostInfo), &s.hostInfo)
+	s.mu.Lock()
+	factory := s.factory
+	s.ready = false
+	s.handlers = map[string][]Handler{}
+	s.busHandlers = map[string][]func(any){}
+	s.tools = map[string]*toolEntry{}
+	s.commands = map[string]*commandEntry{}
+	s.shortcuts = nil
+	s.shortcutHandlers = map[string]func(*Context) error{}
+	s.flags = map[string]plugin.FlagSpec{}
+	s.flagValues = map[string]any{}
+	s.renderers = nil
+	s.mu.Unlock()
+	api := newAPI(s)
+	if factory != nil {
+		factory(api)
+	}
+	s.mu.Lock()
+	s.ready = true
+	s.mu.Unlock()
+	reg = api.registration()
+	if reg.Name == "" {
+		reg.Name = "unnamed"
+	}
+	if reg.Version == "" {
+		reg.Version = s.version
+	}
+	s.mu.Lock()
+	s.name = reg.Name
+	if s.version == "" {
+		s.version = reg.Version
+	}
+	s.mu.Unlock()
+	return reg
+}
+
+// Call is the Go half of NuloPluginCall.
+func Call(request string) (result string) {
 	var invoke plugin.Invoke
 	if err := json.Unmarshal([]byte(request), &invoke); err != nil {
 		raw, _ := json.Marshal(plugin.InvokeResult{Error: "invalid invoke: " + err.Error()})
 		return string(raw)
 	}
+	raw, _ := json.Marshal(dispatchInvoke(invoke))
+	return string(raw)
+}
+
+func dispatchInvoke(invoke plugin.Invoke) (result plugin.InvokeResult) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = plugin.InvokeResult{Error: fmt.Sprint(recovered)}
+		}
+	}()
 	var value any
 	var err error
 	switch invoke.Type {
@@ -148,16 +156,13 @@ func Call(request string) (result string) {
 		err = fmt.Errorf("unknown invoke type %q", invoke.Type)
 	}
 	if err != nil {
-		raw, _ := json.Marshal(plugin.InvokeResult{Error: err.Error()})
-		return string(raw)
+		return plugin.InvokeResult{Error: err.Error()}
 	}
-	raw, merr := json.Marshal(value)
-	if merr != nil {
-		raw, _ = json.Marshal(plugin.InvokeResult{Error: merr.Error()})
-		return string(raw)
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return plugin.InvokeResult{Error: err.Error()}
 	}
-	envelope, _ := json.Marshal(plugin.InvokeResult{Result: raw})
-	return string(envelope)
+	return plugin.InvokeResult{Result: raw}
 }
 
 func (s *server) event(invoke plugin.Invoke) (any, error) {

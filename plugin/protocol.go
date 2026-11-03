@@ -149,6 +149,20 @@ var eventNameSet = func() map[string]bool {
 // IsEvent reports whether name is an event in the Pi extension surface.
 func IsEvent(name string) bool { return eventNameSet[name] }
 
+// ProtocolMessage is one JSON frame on a protocol plugin's stdin/stdout.
+// Frames are newline-delimited JSON objects.
+type ProtocolMessage struct {
+	Type         string        `json:"type"`
+	ID           uint64        `json:"id,omitempty"`
+	HostInfo     *HostInfo     `json:"hostInfo,omitempty"`
+	Registration *Registration `json:"registration,omitempty"`
+	Invoke       *Invoke       `json:"invoke,omitempty"`
+	Result       *InvokeResult `json:"result,omitempty"`
+	Call         *HostCall     `json:"call,omitempty"`
+	Reply        *HostReply    `json:"reply,omitempty"`
+	Error        string        `json:"error,omitempty"`
+}
+
 // Invoke is one call into a loaded plugin.
 type Invoke struct {
 	// Type is "event", "tool", "command", "shortcut" or "host".

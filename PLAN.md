@@ -228,15 +228,15 @@ frontmatter 按 Pi 的方式提取：CRLF 归一、去 BOM、闭合围栏是 off
 
 ### 明确砍掉（第一期）
 
-TUI、CLI、RPC、HTTP 服务、TS/Node 扩展（改用 native plugin ABI）、Durable/Chord、virtual model、cache warming、OAuth（provider 与 MCP）、项目 trust **UI**（只留 Options 布尔）、自动压缩、classifier/image 模型、prompt templates、themes。
+TUI、CLI、RPC、HTTP 服务、TS/Node 扩展（改用 native plugin ABI + stdio 协议）、Durable/Chord、virtual model、cache warming、OAuth（provider 与 MCP）、项目 trust **UI**（只留 Options 布尔）、自动压缩、classifier/image 模型、prompt templates、themes。
 
 ## Files to modify / 新建
 
 ```
 LICENSE NOTICE README.md
 sdk/*.go
-plugin/{doc,host,protocol,library,library_windows,library_unix,unsafe}.go
-plugin/sdk/{api,context,server,types,hostcall,doc}.go
+plugin/{doc,host,protocol,discover,protocol_host,library,library_windows,library_unix,unsafe}.go
+plugin/sdk/{api,context,server,protocol,types,hostcall,doc}.go
 plugin/sdk/cabi/cabi.go
 ai/{types,stream,faux,openai_completions,openai_responses,anthropic_messages,overflow}.go
 agent/{types,agent,loop}.go

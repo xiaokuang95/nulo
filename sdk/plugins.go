@@ -133,14 +133,21 @@ func (s *AgentSessionServices) ensurePlugins() {
 		})
 		s.plugins = host
 		for _, path := range s.pluginSources() {
-			libs, err := plugin.DiscoverPath(path)
+			sources, err := plugin.Discover(path)
 			if err != nil {
 				s.addPluginDiagnostic(PluginDiagnostic{Path: path, Message: err.Error()})
 				continue
 			}
-			for _, lib := range libs {
-				if _, err := host.Load(lib); err != nil {
-					s.addPluginDiagnostic(PluginDiagnostic{Path: lib, Message: err.Error()})
+			for _, source := range sources {
+				var loadErr error
+				switch source.Kind {
+				case plugin.SourceProtocol:
+					_, loadErr = host.LoadProtocol(source.Path)
+				default:
+					_, loadErr = host.Load(source.Path)
+				}
+				if loadErr != nil {
+					s.addPluginDiagnostic(PluginDiagnostic{Path: source.Path, Message: loadErr.Error()})
 				}
 			}
 		}

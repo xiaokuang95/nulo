@@ -1,0 +1,7 @@
+{
+  "name": "example-protocol",
+  "version": "1.0.0",
+  "protocol": "stdio",
+  "command": "./plugin-protocol",
+  "timeout": 30
+}

@@ -15,7 +15,7 @@ var nextCallID atomic.Uint64
 const hostBufferSize = 8 << 20
 
 func (s *server) hostCall(method string, params any, out any) error {
-	if s.hostCallPtr == 0 {
+	if s.hostCallPtr == 0 && s.hostCallFn == nil {
 		return fmt.Errorf("plugin: host callback is not available")
 	}
 	var rawParams json.RawMessage
@@ -35,6 +35,10 @@ func (s *server) hostCall(method string, params any, out any) error {
 	if err != nil {
 		return err
 	}
+	return s.decodeHostReply(method, response, out)
+}
+
+func (s *server) decodeHostReply(method string, response []byte, out any) error {
 	var reply struct {
 		ID     uint64           `json:"id"`
 		Result json.RawMessage  `json:"result"`
@@ -59,6 +63,9 @@ func (s *server) hostCallVoid(method string, params any) error {
 }
 
 func (s *server) invokeHost(request []byte) ([]byte, error) {
+	if s.hostCallFn != nil {
+		return s.hostCallFn(request)
+	}
 	out := make([]byte, hostBufferSize)
 	var needed int32
 	reqPtr := uintptr(unsafe.Pointer(&request[0]))

@@ -48,6 +48,7 @@ type Instance struct {
 	Path         string
 	Registration Registration
 	lib          nativeLibrary
+	proto        *protocolProcess
 	host         *Host
 	mu           sync.Mutex
 	closed       bool
@@ -162,6 +163,9 @@ func (h *Host) Load(path string) (*Instance, error) {
 }
 
 func (i *Instance) init(info HostInfo, callback uintptr) ([]byte, error) {
+	if i.proto != nil {
+		return i.proto.init(info)
+	}
 	rawInfo, err := json.Marshal(info)
 	if err != nil {
 		return nil, err
@@ -187,6 +191,13 @@ func (i *Instance) Call(ctx context.Context, invoke Invoke) (json.RawMessage, er
 		return nil, fmt.Errorf("plugin %s is closed", i.Registration.Name)
 	}
 	i.mu.Unlock()
+	if i.proto != nil {
+		text, err := i.proto.call(ctx, invoke)
+		if err != nil {
+			return nil, fmt.Errorf("plugin %s: %w", i.Registration.Name, err)
+		}
+		return decodeInvokeResult(i.Registration.Name, text)
+	}
 	raw, err := json.Marshal(invoke)
 	if err != nil {
 		return nil, err
@@ -201,12 +212,16 @@ func (i *Instance) Call(ctx context.Context, invoke Invoke) (json.RawMessage, er
 	}
 	text := readCString(res, 64<<20)
 	i.free(res)
-	decoded, err := DecodeInvokeResult([]byte(text))
+	return decodeInvokeResult(i.Registration.Name, []byte(text))
+}
+
+func decodeInvokeResult(name string, text []byte) (json.RawMessage, error) {
+	decoded, err := DecodeInvokeResult(text)
 	if err != nil {
-		return nil, fmt.Errorf("plugin %s: %w", i.Registration.Name, err)
+		return nil, fmt.Errorf("plugin %s: %w", name, err)
 	}
 	if decoded.Error != "" {
-		return nil, fmt.Errorf("plugin %s: %s", i.Registration.Name, decoded.Error)
+		return nil, fmt.Errorf("plugin %s: %s", name, decoded.Error)
 	}
 	if len(decoded.Result) == 0 {
 		return json.RawMessage("null"), nil
@@ -286,7 +301,7 @@ func (i *Instance) ExecuteCommand(ctx context.Context, name, args string, ctxDat
 }
 
 func (i *Instance) free(ptr uintptr) {
-	if ptr == 0 {
+	if ptr == 0 || i.proto != nil {
 		return
 	}
 	_, _ = i.lib.call(FreeSymbol, ptr)
@@ -368,7 +383,11 @@ func (h *Host) Close() error {
 	for _, inst := range instances {
 		inst.mu.Lock()
 		inst.closed = true
+		proto := inst.proto
 		inst.mu.Unlock()
+		if proto != nil {
+			_ = proto.close()
+		}
 		// Do not dlclose/FreeLibrary a library that may contain a Go runtime.
 		// The OS reclaims it at process exit.
 	}
@@ -390,6 +409,15 @@ type Manifest struct {
 	APIVersion  int               `json:"apiVersion,omitempty"`
 	Library     string            `json:"library,omitempty"`
 	Platforms   map[string]string `json:"platforms,omitempty"`
+
+	// Protocol plugins are separate processes. "stdio" is the frames-on-
+	// stdin/stdout transport; Command is resolved relative to the manifest.
+	Protocol string            `json:"protocol,omitempty"`
+	Command  string            `json:"command,omitempty"`
+	Args     []string          `json:"args,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	CWD      string            `json:"cwd,omitempty"`
+	Timeout  int               `json:"timeout,omitempty"` // seconds
 }
 
 // DiscoverPath turns a file, a manifest, or a directory into library paths.
