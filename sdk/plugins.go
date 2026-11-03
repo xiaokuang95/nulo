@@ -9,9 +9,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/xiaokuang95/nulo/plugin"
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
 	"github.com/xiaokuang95/nulo/sdk/internal/mcp"
+	"github.com/xiaokuang95/nulo/sdk/internal/plugin"
 )
 
 // PluginUI is the optional host-side UI bridge for native plugins. A nil
@@ -99,6 +99,9 @@ func (s *AgentSessionServices) initPluginMaps() {
 	}
 	if s.busSubscribers == nil {
 		s.busSubscribers = map[string][]func(any){}
+	}
+	if s.childSessions == nil {
+		s.childSessions = map[string]*pluginChildSession{}
 	}
 	s.pluginMu.Unlock()
 	s.providersMu.Lock()
@@ -735,6 +738,26 @@ func (s *AgentSessionServices) pluginHostCall(ctx context.Context, method string
 		var out []any
 		_ = json.Unmarshal(raw, &out)
 		return out, nil
+	case "session.create":
+		return s.createPluginSession(ctx, arg)
+	case "session.send":
+		return s.pluginChildSend(ctx, arg)
+	case "session.steer":
+		return s.pluginChildSteer(ctx, arg)
+	case "session.abort":
+		return s.pluginChildAbort(ctx, arg)
+	case "session.wait":
+		return s.pluginChildWait(ctx, arg)
+	case "session.result":
+		return s.pluginChildResult(ctx, arg)
+	case "session.messages":
+		return s.pluginChildMessages(ctx, arg)
+	case "session.status":
+		return s.pluginChildStatus(ctx, arg)
+	case "session.list":
+		return s.pluginChildList(ctx)
+	case "session.dispose":
+		return s.pluginChildDispose(ctx, arg)
 	case "modelRegistry.find":
 		return BuildModel(stringArg(arg, "spec"), &AgentSessionServices{AgentDir: s.AgentDir, SettingsManager: s.SettingsManager, dynamicProviders: s.providerSnapshot()})
 	case "modelRegistry.available":

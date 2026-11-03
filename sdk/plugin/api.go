@@ -6,7 +6,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/xiaokuang95/nulo/plugin"
+	"github.com/xiaokuang95/nulo/sdk/internal/plugin"
 )
 
 // API is the surface passed to a Factory. Its method names follow Pi's

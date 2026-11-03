@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/xiaokuang95/nulo/plugin/sdk"
+	"github.com/xiaokuang95/nulo/sdk/plugin"
 )
 
 func main() {

@@ -28,8 +28,8 @@ Shared-library example:
 
 ```go
 import (
-    "github.com/xiaokuang95/nulo/plugin/sdk"
-    _ "github.com/xiaokuang95/nulo/plugin/sdk/cabi"
+    "github.com/xiaokuang95/nulo/sdk/plugin"
+    _ "github.com/xiaokuang95/nulo/sdk/plugin/cabi"
 )
 
 func main() {}
@@ -79,7 +79,55 @@ raw `.dll`/`.so`/`.dylib` files, and protocol executables declared by manifests.
 
 `HostInfo`, `HostCall`, tool definitions, provider hooks, session/tree/compaction
 events, UI dialogs, MCP registration and flags use the same JSON shapes in both
-modes. See `plugin/doc.go`, `plugin/sdk`, and `examples/plugin`.
+modes. See `sdk/internal/plugin/doc.go`, `sdk/plugin`, and `examples/plugin`.
+
+### Custom subagents
+
+The host does not define an `Agent` tool, agent types, prompts, routing, or
+concurrency policy. A plugin can implement any of those on top of generic child
+sessions:
+
+```go
+api.RegisterTool(sdk.ToolDefinition{
+    Name: "Agent",
+    Parameters: []byte(`{"type":"object","properties":{
+        "prompt":{"type":"string"},
+        "systemPrompt":{"type":"string"}
+    },"required":["prompt"]}`),
+    Execute: func(ctx *sdk.Context, id string, args map[string]any) (sdk.ToolResult, error) {
+        systemPrompt, _ := args["systemPrompt"].(string)
+        child, err := ctx.API().CreateSession(sdk.SessionOptions{
+            SystemPrompt: systemPrompt,
+            Tools:        []string{"read"},
+            // NoTools: true starts with no built-in tools instead.
+        })
+        if err != nil {
+            return sdk.ToolResult{}, err
+        }
+        defer child.Dispose()
+
+        prompt, _ := args["prompt"].(string)
+        result, err := child.Send(prompt)
+        if err != nil {
+            return sdk.ToolResult{}, err
+        }
+        return sdk.ToolResult{
+            Content: []sdk.ContentBlock{{Type: "text", Text: result.Text}},
+        }, nil
+    },
+})
+```
+
+`CreateSession` returns an independent `*sdk.Session`; it does not switch the
+parent session. The plugin controls the agent definitions, model/prompt/tool
+selection, background goroutines, result storage, completion messages and UI.
+The child session API also exposes `Send`, `Prompt`, `Steer`, `Abort`, `Wait`,
+`Result`, `Messages`, `Status`, `File`, `ListSessions` and `Dispose`. Child
+sessions are in-memory by default; set `Persist: true` to write them to the normal session directory and
+`ResumeFrom` to reopen one later. `Plugins` is off by default to avoid recursive
+orchestration and duplicated plugin side effects. See
+`examples/plugin-subagent` for a protocol plugin that defines its own `scout`
+and `worker` types and turns them into an `Agent` tool.
 
 Build and run the end-to-end fixture:
 

@@ -7,7 +7,7 @@ import (
 	"unsafe"
 
 	"github.com/ebitengine/purego"
-	"github.com/xiaokuang95/nulo/plugin"
+	"github.com/xiaokuang95/nulo/sdk/internal/plugin"
 )
 
 var nextCallID atomic.Uint64

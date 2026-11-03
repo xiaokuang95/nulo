@@ -9,8 +9,8 @@ package main
 //go:generate go build -buildmode=c-shared -o nulo-example.so . (linux)
 
 import (
-	"github.com/xiaokuang95/nulo/plugin/sdk"
-	_ "github.com/xiaokuang95/nulo/plugin/sdk/cabi"
+	"github.com/xiaokuang95/nulo/sdk/plugin"
+	_ "github.com/xiaokuang95/nulo/sdk/plugin/cabi"
 )
 
 func main() {}

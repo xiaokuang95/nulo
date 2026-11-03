@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xiaokuang95/nulo/plugin"
+	"github.com/xiaokuang95/nulo/sdk/internal/plugin"
 )
 
 func TestServerLifecycle(t *testing.T) {

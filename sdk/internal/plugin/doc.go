@@ -17,6 +17,12 @@
 //
 // Init returns a Registration; Call executes one event, tool or command.
 // HostCall is a function pointer the plugin uses for API calls such as
-// getActiveTools or sendUserMessage. See package plugin/sdk for the Go side of
+// getActiveTools or sendUserMessage. See package sdk/plugin for the Go side of
 // both modes.
+//
+// Plugins can also create independent child sessions through
+// sdk/plugin.API.CreateSession. The host owns the session runtime and exposes
+// prompt/steer/abort/result primitives; the plugin owns any subagent naming,
+// prompt construction, concurrency, persistence and completion policy. There
+// is no built-in Agent type or hardcoded subagent implementation.
 package plugin

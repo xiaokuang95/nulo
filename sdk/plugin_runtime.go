@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xiaokuang95/nulo/plugin"
 	"github.com/xiaokuang95/nulo/sdk/internal/agent"
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
 	"github.com/xiaokuang95/nulo/sdk/internal/mcp"
+	"github.com/xiaokuang95/nulo/sdk/internal/plugin"
 	"github.com/xiaokuang95/nulo/sdk/internal/session"
 )
 

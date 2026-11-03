@@ -10,8 +10,8 @@ package main
 import (
 	"strings"
 
-	"github.com/xiaokuang95/nulo/plugin/sdk"
-	_ "github.com/xiaokuang95/nulo/plugin/sdk/cabi"
+	"github.com/xiaokuang95/nulo/sdk/plugin"
+	_ "github.com/xiaokuang95/nulo/sdk/plugin/cabi"
 )
 
 func main() {}

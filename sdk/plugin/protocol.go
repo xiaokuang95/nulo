@@ -9,7 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/xiaokuang95/nulo/plugin"
+	"github.com/xiaokuang95/nulo/sdk/internal/plugin"
 )
 
 // ServeProtocol runs a plugin as a standalone process speaking the stdio

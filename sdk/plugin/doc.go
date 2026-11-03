@@ -14,6 +14,11 @@
 // extension events, and call back into the host for session, model, UI and
 // persistence actions.
 //
+// API.CreateSession creates an independent child session with its own model,
+// system prompt, tools and history. The host deliberately does not define an
+// Agent tool or subagent types; plugins own that policy and use Session.Send,
+// Steer, Abort, Result and Dispose as primitives.
+//
 // The package does not import the nulo SDK. A plugin is an independent Go
 // program, so it can use a different Go version and different dependencies
 // from the host.

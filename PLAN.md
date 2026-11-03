@@ -235,9 +235,9 @@ TUI、CLI、RPC、HTTP 服务、TS/Node 扩展（改用 native plugin ABI + stdi
 ```
 LICENSE NOTICE README.md
 sdk/*.go
-plugin/{doc,host,protocol,discover,protocol_host,library,library_windows,library_unix,unsafe}.go
-plugin/sdk/{api,context,server,protocol,types,hostcall,doc}.go
-plugin/sdk/cabi/cabi.go
+sdk/internal/plugin/{doc,host,protocol,discover,protocol_host,library,library_windows,library_unix,unsafe}.go
+sdk/plugin/{api,context,server,protocol,types,hostcall,doc}.go
+sdk/plugin/cabi/cabi.go
 ai/{types,stream,faux,openai_completions,openai_responses,anthropic_messages,overflow}.go
 agent/{types,agent,loop}.go
 session/{manager,compaction,branch_summary,messages}.go
@@ -296,6 +296,7 @@ examples/sdk/main.go
 - **`models.json` 对齐 Pi 的解析与认证语义**:之前有 6 处实质偏差——(1) apiKey 优先级是 models.json > auth.json,Pi 是 auth.json > models.json;(2) 未知 provider 回落到 `OPENAI_API_KEY`,等于把 OpenAI 的 key 发给任意网关,Pi 只认 provider 自己的环境变量;(3) `$ENV` 缺失时逐变量替换为空串,Pi 视为整个值 undefined,请求报 "Failed to resolve ... from environment variable";(4) `!command` 在建模时跑一次,Pi 每次请求都跑;(5) header 合并大小写不同就两条都发,且 `null` 无法删除继承的 header;(6) `models.json` 不支持 `//` 注释与尾逗号。现按 Pi 全部修齐,并补了 `authHeader`、`cost.tiers` 分档定价、`input` 默认 `["text"]`、同 provider 重复 model id 后者覆盖、裸 id 默认 `openai`、错误文案 `model not found: provider/id`。
 - **`models.json` 全字段落地**:`thinkingLevelMap` + `thinkingFormat` + `supportsReasoningEffort` / `thinkingTokenBudgetField` 三条 API 真下发(OpenAI 兼容侧覆盖 Pi 的 11 种格式:openai / openrouter / deepseek / zai / qwen / qwen-chat-template / chat-template / baseten / together / ant-ling / string-thinking;Anthropic 走 budget 或 `forceAdaptiveThinking` 的 adaptive+effort);`samplingParams` / `samplingParamsByThinkingLevel` 按「模型 → 档位 → 请求」合入 OpenAI 兼容请求体;`inputLimits.images.resize` 在请求前把 PNG/JPEG 缩到 maxWidth/maxHeight/maxBytes(`maxPer*` / `maxRequestBytes` 只解析,Pi 也还没据此拒绝历史);`modelOverrides` 按字段合并(nulo 没有内建目录,作用于同 provider 的模型);`promptCache` 驱动缓存保温(streaming / idle 两模式,按 Pi 的 $0.05 期望收益门槛,重放请求时 max_tokens=1);`oauth` 支持 `auth.json` 的 OAuth 凭证与 Radius `refresh_token` 换发并回写(交互式浏览器/设备码登录仍未做)。Session 新增 `ThinkingLevel` 启动项、`SetThinkingLevel` / `ThinkingLevel` / `CacheWarming` 模式,档位随 `thinking_level_change` 持久化并在恢复时还原。
 - **sessions 对齐 Pi/PiG**:之前只覆盖自己会写的 7 种 entry，且 session ID 是 `nulo_` 前缀、坏行直接报错、没有 v1/v2 迁移、没有 label/usage/context_edit/custom_message、resume 不恢复 model、import 不复制、缺失路径不能当新会话打开。现按 Pi 的 `session-manager.ts` / PiG `codingagent.Session` 对齐：UUIDv7 session ID、8 位十六进制 entry ID（冲突 100 次后 UUIDv4）、绝对 cwd、全部 entry 类型与字段、Pi 的打开/迁移/跳过坏行语义、名字/标签/usage/context edit、模型恢复、session 列表/重命名/删除、import 复制与 fork 未落盘报错，并让 JSONL 不再 HTML 转义（`<`/`>`/`&` 保持字面，和 `JSON.stringify` 一致）。
+- **插件自定义 subagent**:没有在 SDK 里写死 `Agent` 工具、agent 类型或 prompt。新增 `sdk/plugin.API.CreateSession` 和独立 `Session`，宿主只提供 `session.create/send/steer/abort/wait/result/messages/status/list/dispose`；agent 发现、模型/工具/系统提示词选择、后台 goroutine、结果存储和完成通知都由插件自己实现。子会话默认内存态，`Persist` 可选、`ResumeFrom` 可恢复；默认不加载插件，避免递归编排。
 验证:`tools/powershell_test.go` 在 Windows 上真跑(含 UTF-8 输出、退出码、空输出、无效超时、超时杀进程树、tail 截断);`ai/usage_test.go` 用 httptest 覆盖三条 API 与三种缓存命名拼写;`sdk/runtime_test.go` 的 `TestSessionDirEnvOverride` 断言会话文件落在 env 指定的根下、且 agent 目录里不再出现 `sessions/`;`ai/models_json_test.go` 覆盖字段继承与覆盖、compat 合并与默认值、插值四形态与转义、旧格式报错、apiKey 不进 JSON、以及三条 API 的 compat 真的改变了请求体;`ai/models_parity_test.go` 覆盖 header null 删除与大小写合并、apiKey 优先级、逐请求解析、`!command` 失败推迟到请求、`authHeader`、`cost.tiers`;`ai/models_fields_test.go` 覆盖新字段解析与 override 合并、thinking 格式与 `reasoning_effort` 门控、sampling 顺序、图片缩放、promptCache 时序、OAuth 刷新与回写;`sdk/session_models_test.go` 覆盖 thinking 档位持久化/恢复、保温收益判定与 idle 模式真实重放;`session/parity_test.go` / `sdk/session_parity_test.go` 覆盖 entry 投影、迁移、坏行、label/usage/context_edit、session 列表、import/fork、resume 恢复 model/thinking。
 
 ## Verification

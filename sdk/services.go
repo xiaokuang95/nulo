@@ -3,9 +3,9 @@ package sdk
 import (
 	"sync"
 
-	"github.com/xiaokuang95/nulo/plugin"
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
 	"github.com/xiaokuang95/nulo/sdk/internal/mcp"
+	"github.com/xiaokuang95/nulo/sdk/internal/plugin"
 	"github.com/xiaokuang95/nulo/sdk/internal/session"
 	settingspkg "github.com/xiaokuang95/nulo/sdk/internal/settings"
 )
@@ -46,6 +46,7 @@ type AgentSessionServices struct {
 	pluginDiags   []PluginDiagnostic
 	pluginSession *Session
 	pluginRuntime *Runtime
+	childSessions map[string]*pluginChildSession
 	pluginMode    string
 	uiBridge      *PluginUI
 
@@ -106,6 +107,7 @@ func (s *AgentSessionServices) GetSettingsManager() *SettingsManager {
 }
 
 func (s *AgentSessionServices) Close() error {
+	s.closePluginChildren()
 	if s.plugins != nil {
 		return s.plugins.Close()
 	}

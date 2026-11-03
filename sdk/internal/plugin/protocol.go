@@ -49,7 +49,7 @@ type Registration struct {
 	Error string `json:"error,omitempty"`
 }
 
-// ToolSpec is the host-side half of plugin/sdk.ToolDefinition.
+// ToolSpec is the host-side half of sdk/plugin.ToolDefinition.
 type ToolSpec struct {
 	Name             string          `json:"name"`
 	Label            string          `json:"label,omitempty"`

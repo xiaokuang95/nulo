@@ -3,7 +3,7 @@ package sdk
 import (
 	"encoding/json"
 
-	"github.com/xiaokuang95/nulo/plugin"
+	"github.com/xiaokuang95/nulo/sdk/internal/plugin"
 )
 
 // ToolResult is what a plugin tool returns.

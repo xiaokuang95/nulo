@@ -8,7 +8,7 @@ import "C"
 import (
 	"unsafe"
 
-	pluginsdk "github.com/xiaokuang95/nulo/plugin/sdk"
+	pluginsdk "github.com/xiaokuang95/nulo/sdk/plugin"
 )
 
 // The functions below are the C ABI every nulo plugin library exports. They are

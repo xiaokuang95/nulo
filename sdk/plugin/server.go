@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/xiaokuang95/nulo/plugin"
+	"github.com/xiaokuang95/nulo/sdk/internal/plugin"
 )
 
 type server struct {

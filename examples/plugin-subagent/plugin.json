@@ -1,0 +1,7 @@
+{
+  "name": "subagent-example",
+  "version": "1.0.0",
+  "protocol": "stdio",
+  "command": "./plugin-subagent",
+  "timeout": 30
+}
