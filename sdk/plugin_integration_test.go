@@ -165,3 +165,136 @@ func TestProtocolPluginEndToEnd(t *testing.T) {
 		t.Fatal("protocol tool result not found")
 	}
 }
+
+func TestPluginExampleSharedLibrary(t *testing.T) {
+	ext := ".so"
+	if runtime.GOOS == "windows" {
+		ext = ".dll"
+	} else if runtime.GOOS == "darwin" {
+		ext = ".dylib"
+	}
+	dir, err := os.MkdirTemp("", "nulo-example-shared-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	lib := filepath.Join(dir, "example"+ext)
+	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-o", lib, ".")
+	cmd.Dir = "../examples/plugin"
+	if build, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build examples/plugin: %v\n%s", err, build)
+	}
+	p := ai.NewFauxProvider()
+	p.SetResponses(
+		ai.FauxAssistantBlocks([]ai.ContentBlock{ai.ToolCallBlock("c1", "echo", map[string]any{"text": "hi"})}, ai.StopToolUse),
+		ai.FauxAssistant("done"),
+	)
+	stream := func(ctx context.Context, model ai.Model, tr ai.Transcript, opts ai.StreamOptions) *ai.EventStream {
+		return p.StreamSimple(ctx, model, tr, opts)
+	}
+	svcs, err := CreateAgentSessionServices(CreateAgentSessionServicesOptions{
+		CWD: dir, AgentDir: t.TempDir(), InMemory: true,
+		StreamFn: stream, PluginPaths: []string{lib},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := NewRuntime(RuntimeOptions{Services: svcs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diags := sess.PluginDiagnostics(); len(diags) != 0 {
+		t.Fatalf("diagnostics: %v", diags)
+	}
+	if sess.Name() != "example session" {
+		t.Fatalf("session name %q", sess.Name())
+	}
+	if !hasTool(sess.tools, "echo") {
+		t.Fatalf("echo tool missing: %v", sess.ActiveToolNames())
+	}
+	if _, err := sess.Send(context.Background(), "run"); err != nil {
+		t.Fatal(err)
+	}
+	if !toolResultContains(sess, "[hi]") {
+		t.Fatal("examples/plugin tool result missing [hi]")
+	}
+}
+
+func TestPluginExampleProtocol(t *testing.T) {
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+	dir, err := os.MkdirTemp("", "nulo-example-protocol-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	exe := filepath.Join(dir, "example-protocol"+ext)
+	cmd := exec.Command("go", "build", "-o", exe, ".")
+	cmd.Dir = "../examples/plugin-protocol"
+	if build, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build examples/plugin-protocol: %v\n%s", err, build)
+	}
+	manifest, _ := json.Marshal(map[string]any{
+		"name": "example-protocol", "version": "1.0.0",
+		"protocol": "stdio", "command": exe,
+	})
+	manifestPath := filepath.Join(dir, "plugin.json")
+	if err := os.WriteFile(manifestPath, manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := ai.NewFauxProvider()
+	p.SetResponses(
+		ai.FauxAssistantBlocks([]ai.ContentBlock{ai.ToolCallBlock("c1", "protocol_echo", map[string]any{"text": "hi"})}, ai.StopToolUse),
+		ai.FauxAssistant("done"),
+	)
+	stream := func(ctx context.Context, model ai.Model, tr ai.Transcript, opts ai.StreamOptions) *ai.EventStream {
+		return p.StreamSimple(ctx, model, tr, opts)
+	}
+	svcs, err := CreateAgentSessionServices(CreateAgentSessionServicesOptions{
+		CWD: dir, AgentDir: t.TempDir(), InMemory: true,
+		StreamFn: stream, PluginPaths: []string{manifestPath},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := NewRuntime(RuntimeOptions{Services: svcs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diags := sess.PluginDiagnostics(); len(diags) != 0 {
+		t.Fatalf("diagnostics: %v", diags)
+	}
+	if sess.Name() != "protocol example" {
+		t.Fatalf("session name %q", sess.Name())
+	}
+	if !hasTool(sess.tools, "protocol_echo") {
+		t.Fatalf("protocol_echo tool missing: %v", sess.ActiveToolNames())
+	}
+	if _, err := sess.Send(context.Background(), "run"); err != nil {
+		t.Fatal(err)
+	}
+	if !toolResultContains(sess, "hi") {
+		t.Fatal("examples/plugin-protocol tool result missing hi")
+	}
+}
+
+func toolResultContains(sess *Session, text string) bool {
+	for _, entry := range sess.Manager().Branch() {
+		if entry.Message != nil && entry.Message.Role == "toolResult" && strings.Contains(ai.MessageText(*entry.Message), text) {
+			return true
+		}
+	}
+	return false
+}
