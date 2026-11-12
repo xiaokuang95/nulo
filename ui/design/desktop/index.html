@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="description" content="nulo desktop — an interactive design prototype for the nulo coding agent.">
+<title>nulo — desktop shell</title>
+<script>
+  try {
+    var p = JSON.parse(localStorage.getItem("nulo.desktop.prototype.v1") || "{}");
+    var r = document.documentElement;
+    r.dataset.theme = p.theme === "paper" ? "paper" : "moss";
+    if (p.density) r.dataset.density = p.density;
+    if (p.motion) r.dataset.motion = p.motion;
+    if (typeof p.timestamps === "boolean") r.dataset.timestamps = p.timestamps ? "on" : "off";
+    if (typeof p.reasoning === "boolean") r.dataset.reasoning = p.reasoning ? "on" : "off";
+  } catch (error) {}
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23b7e08b'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='monospace' font-size='21' font-weight='700' fill='%23070a08'%3En%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-git-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-panel-left" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></symbol>
+  <symbol id="i-panel-right" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></symbol>
+  <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6M12 19h8"/></symbol>
+  <symbol id="i-diff" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 12v6M9 15h6"/></symbol>
+  <symbol id="i-list-checks" viewBox="0 0 24 24"><path d="m3 17 2 2 4-4M3 7l2 2 4-4M13 6h8M13 12h8M13 18h8"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></symbol>
+  <symbol id="i-paperclip" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+  <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></symbol>
+  <symbol id="i-fork" viewBox="0 0 24 24"><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><circle cx="12" cy="6" r="3"/><path d="M12 9v3a3 3 0 0 0 3 3h0a3 3 0 0 1 3 3M12 12a3 3 0 0 1-3 3h0a3 3 0 0 0-3 3"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 3l14 9-14 9z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 4v16M16 4v16"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></symbol>
+  <symbol id="i-command" viewBox="0 0 24 24"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 0 0 0-6z"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"/><path d="M19 3v4M17 5h4"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z"/></symbol>
+  <symbol id="i-test" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2h12.4a1.5 1.5 0 0 0 1.3-2L14 9V3"/><path d="M7 15h10"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/></symbol>
+  <symbol id="i-package" viewBox="0 0 24 24"><path d="m7.5 4.27 9 5.15M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></symbol>
+  <symbol id="i-corner" viewBox="0 0 24 24"><path d="M15 10l5 5-5 5M4 4v7a4 4 0 0 0 4 4h12"/></symbol>
+  <symbol id="i-compress" viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+  <symbol id="i-at" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></symbol>
+</svg>
+
+<div class="app" id="app" data-theme="moss" data-density="comfortable">
+  <header class="titlebar">
+    <div class="titlebar-brand" title="nulo desktop">
+      <span class="logo-mark" aria-hidden="true">n</span>
+      <span class="brand-name">nulo</span>
+    </div>
+
+    <div class="workspace-chip" title="Workspace">
+      <span class="workspace-icon" aria-hidden="true">n</span>
+      <span class="workspace-name">nulo</span>
+      <span class="workspace-branch"><span class="branch-dot"></span>main</span>
+    </div>
+
+    <button class="command-trigger" id="commandTrigger" aria-label="Search sessions and commands">
+      <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+      <span class="command-trigger-label">Search sessions and commands</span>
+      <kbd>Ctrl K</kbd>
+    </button>
+
+    <div class="titlebar-actions">
+      <button class="run-badge" id="runBadge" title="Show active sessions">
+        <span class="pulse-dot" aria-hidden="true"></span>
+        <span id="runBadgeLabel">2 active</span>
+      </button>
+      <div class="titlebar-divider" aria-hidden="true"></div>
+      <button class="icon-btn" id="toggleSidebarBtn" aria-label="Toggle sidebar" title="Toggle sidebar · Ctrl B">
+        <svg class="icon" aria-hidden="true"><use href="#i-panel-left"/></svg>
+      </button>
+      <button class="icon-btn is-on" id="toggleDockBtn" aria-label="Toggle right panel" title="Toggle right panel · Ctrl J">
+        <svg class="icon" aria-hidden="true"><use href="#i-panel-right"/></svg>
+      </button>
+      <button class="icon-btn" id="settingsBtn" aria-label="Settings" title="Settings · Ctrl ,">
+        <svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="workbench" id="workbench">
+    <aside class="sidebar" id="sidebar" aria-label="Sessions">
+      <div class="sidebar-top">
+        <button class="new-session-btn" id="newSessionBtn">
+          <svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>
+          <span>New session</span>
+          <kbd>Ctrl N</kbd>
+        </button>
+
+        <label class="sidebar-search" for="sessionSearch">
+          <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+          <input id="sessionSearch" type="search" placeholder="Filter sessions" autocomplete="off" spellcheck="false">
+          <kbd>Ctrl F</kbd>
+        </label>
+
+        <div class="filter-row" id="filterRow" role="tablist" aria-label="Filter sessions"></div>
+      </div>
+
+      <div class="sidebar-scroll" id="projectList"></div>
+
+      <div class="sidebar-footer">
+        <button class="sidebar-link" id="capabilitiesBtn">
+          <svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg>
+          <span>Capabilities</span>
+          <span class="count-badge">3</span>
+        </button>
+        <button class="sidebar-link" id="sidebarSettingsBtn">
+          <svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg>
+          <span>Settings</span>
+          <kbd>Ctrl ,</kbd>
+        </button>
+        <button class="account-row" id="accountRow" title="Local runtime">
+          <span class="account-avatar">C</span>
+          <span class="account-copy">
+            <strong>crazy</strong>
+            <small>local · cgo</small>
+          </span>
+          <span class="account-status" aria-label="Connected"></span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main" id="main">
+      <header class="sessionbar" id="sessionbar"></header>
+
+      <div class="conversation-scroll" id="conversationScroll">
+        <div class="conversation" id="conversation" tabindex="0" aria-label="Conversation"></div>
+      </div>
+
+      <div class="composer-dock" id="composerDock">
+        <div class="composer-wrap">
+          <div class="composer" id="composer">
+            <div class="slash-menu" id="slashMenu" hidden></div>
+            <div class="slash-menu mention-menu" id="mentionMenu" hidden></div>
+            <div class="attachment-tray" id="attachmentTray" hidden></div>
+
+            <textarea id="composerInput" rows="1" placeholder="Ask nulo to build, debug, or explain…" aria-label="Message nulo"></textarea>
+            <input id="fileInput" type="file" multiple hidden>
+
+            <div class="composer-toolbar">
+              <div class="toolbar-left">
+                <button class="icon-btn soft" id="attachBtn" aria-label="Attach files" title="Attach files">
+                  <svg class="icon" aria-hidden="true"><use href="#i-paperclip"/></svg>
+                </button>
+
+                <div class="popover-anchor">
+                  <button class="chip" id="approvalChip" aria-haspopup="menu" aria-expanded="false" title="Permission mode">
+                    <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>
+                    <span class="chip-label">Auto edits</span>
+                    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+                  </button>
+                  <div class="popover permission-popover" id="approvalPopover" hidden></div>
+                </div>
+
+                <div class="popover-anchor">
+                  <button class="chip" id="envChip" aria-haspopup="menu" aria-expanded="false" title="Environment">
+                    <svg class="icon" aria-hidden="true"><use href="#i-git-branch"/></svg>
+                    <span class="chip-label">Local · main</span>
+                    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+                  </button>
+                  <div class="popover env-popover" id="envPopover" hidden></div>
+                </div>
+              </div>
+
+              <div class="toolbar-right">
+                <button class="ctx-pill" id="ctxPill" title="Open context panel">
+                  <span class="ctx-ring" id="ctxRing" aria-hidden="true"></span>
+                  <span id="ctxPillLabel">42.8k / 512k</span>
+                </button>
+
+                <div class="popover-anchor">
+                  <button class="chip model-chip" id="modelChip" aria-haspopup="menu" aria-expanded="false" title="Switch model">
+                    <svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>
+                    <span class="chip-label" id="modelChipLabel">DeepSeek V4.1 Flash</span>
+                    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+                  </button>
+                  <div class="popover model-popover" id="modelPopover" hidden></div>
+                </div>
+
+                <button class="send-btn" id="sendBtn" aria-label="Send message" title="Send · Enter">
+                  <svg class="icon" aria-hidden="true"><use href="#i-arrow-up"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="composer-meta" id="composerMeta"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <aside class="dock" id="dock" aria-label="Session details">
+      <div class="dock-resizer" id="dockResizer" title="Drag to resize"></div>
+      <div class="dock-inner">
+        <header class="dock-header" id="dockHeader"></header>
+        <div class="dock-body" id="dockBody"></div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<div class="overlay palette-overlay" id="paletteOverlay" hidden>
+  <section class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+    <header class="palette-search">
+      <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+      <input id="paletteInput" type="text" placeholder="Search sessions, actions, and settings…" aria-label="Search sessions, actions, and settings" autocomplete="off" spellcheck="false">
+      <kbd>esc</kbd>
+    </header>
+    <div class="palette-list" id="paletteList"></div>
+    <footer class="palette-foot">
+      <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+      <span><kbd>↵</kbd> select</span>
+      <span class="palette-foot-right">nulo 0.8</span>
+    </footer>
+  </section>
+</div>
+
+<div class="overlay settings-overlay" id="settingsOverlay" hidden>
+  <section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <header class="settings-head">
+      <div>
+        <p class="eyebrow">nulo desktop</p>
+        <h2 id="settingsTitle">Settings</h2>
+      </div>
+      <button class="icon-btn" id="settingsClose" aria-label="Close settings">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </header>
+    <div class="settings-layout">
+      <nav class="settings-nav" id="settingsNav" aria-label="Settings sections"></nav>
+      <div class="settings-content" id="settingsContent"></div>
+    </div>
+    <footer class="settings-foot">
+      <span id="settingsFootNote">Preferences apply immediately in this prototype.</span>
+      <button class="btn primary" id="settingsDone">Done</button>
+    </footer>
+  </section>
+</div>
+
+<div class="overlay dialog-overlay" id="dialogOverlay" hidden>
+  <section class="mini-dialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle">
+    <header class="mini-dialog-head">
+      <div>
+        <p class="eyebrow" id="dialogEyebrow">Session</p>
+        <h2 id="dialogTitle">Rename session</h2>
+      </div>
+      <button class="icon-btn" id="dialogClose" aria-label="Close dialog">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </header>
+    <p class="mini-dialog-desc" id="dialogDesc"></p>
+    <label class="mini-dialog-field" id="dialogField">
+      <span>Session name</span>
+      <input id="dialogInput" type="text" autocomplete="off">
+    </label>
+    <footer class="mini-dialog-actions">
+      <button class="btn ghost" type="button" id="dialogCancel">Cancel</button>
+      <button class="btn primary" type="button" id="dialogConfirm">Save</button>
+    </footer>
+  </section>
+</div>
+
+<div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="false"></div>
+
+<noscript>
+  <div class="noscript">nulo desktop is an interactive prototype. Enable JavaScript to use it.</div>
+</noscript>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
