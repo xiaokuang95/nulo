@@ -22,9 +22,13 @@
     if (session.changes && Array.isArray(session.changes.files)) {
       for (const file of session.changes.files) {
         if (typeof file.reviewed !== "boolean") file.reviewed = Boolean(session.changes.reviewed);
+        if (!file.hunkDecisions) file.hunkDecisions = {};
+        file.staged = Boolean(file.staged);
       }
       session.changes.reviewed = session.changes.files.every((file) => file.reviewed);
     }
+    session.checkpoints = Array.isArray(session.checkpoints) ? session.checkpoints : null;
+    session.lastCommit = session.lastCommit || null;
   }
 
   const STORAGE_KEY = "nulo.desktop.prototype.v1";
@@ -70,6 +74,9 @@
     reasoning: true,
     sidebarOpen: true,
     dockOpen: true,
+    autoClosedSidebar: false,
+    autoClosedDock: false,
+    lastViewportWidth: null,
     dockTab: "changes",
     dockWidth: null,
     activeId: "s1",
@@ -101,6 +108,10 @@
     mentionStart: -1,
     commentDraft: null,
     reviewCounter: 0,
+    messageEdit: null,
+    rewindSessionId: null,
+    rewindIndex: 0,
+    rewindReturnFocus: null,
     attachments: [],
     attachmentCounter: 0,
     sessionCounter: 0,
@@ -111,12 +122,10 @@
     app: document.getElementById("app"),
     workbench: document.getElementById("workbench"),
     titlebar: document.querySelector(".titlebar"),
-    runBadge: document.getElementById("runBadge"),
-    runBadgeLabel: document.getElementById("runBadgeLabel"),
-    commandTrigger: document.getElementById("commandTrigger"),
+    titlebarProject: document.querySelector(".titlebar-project"),
+    titlebarBranch: document.querySelector(".titlebar-branch"),
     toggleSidebarBtn: document.getElementById("toggleSidebarBtn"),
     toggleDockBtn: document.getElementById("toggleDockBtn"),
-    settingsBtn: document.getElementById("settingsBtn"),
     sidebar: document.getElementById("sidebar"),
     newSessionBtn: document.getElementById("newSessionBtn"),
     sessionSearch: document.getElementById("sessionSearch"),
@@ -124,7 +133,6 @@
     projectList: document.getElementById("projectList"),
     capabilitiesBtn: document.getElementById("capabilitiesBtn"),
     sidebarSettingsBtn: document.getElementById("sidebarSettingsBtn"),
-    accountRow: document.getElementById("accountRow"),
     sessionbar: document.getElementById("sessionbar"),
     conversationScroll: document.getElementById("conversationScroll"),
     conversation: document.getElementById("conversation"),
@@ -165,14 +173,20 @@
     dialogTitle: document.getElementById("dialogTitle"),
     dialogDesc: document.getElementById("dialogDesc"),
     dialogField: document.getElementById("dialogField"),
+    dialogFieldLabel: document.querySelector("#dialogField > span"),
     dialogInput: document.getElementById("dialogInput"),
     dialogClose: document.getElementById("dialogClose"),
     dialogCancel: document.getElementById("dialogCancel"),
     dialogConfirm: document.getElementById("dialogConfirm"),
+    rewindOverlay: document.getElementById("rewindOverlay"),
+    rewindList: document.getElementById("rewindList"),
+    rewindDesc: document.getElementById("rewindDesc"),
+    rewindFiles: document.getElementById("rewindFiles"),
+    rewindFilesRow: document.getElementById("rewindFilesRow"),
+    rewindClose: document.getElementById("rewindClose"),
+    rewindCancel: document.getElementById("rewindCancel"),
+    rewindConfirm: document.getElementById("rewindConfirm"),
     toastStack: document.getElementById("toastStack"),
-    workspaceName: document.querySelector(".workspace-name"),
-    workspaceIcon: document.querySelector(".workspace-icon"),
-    workspaceBranch: document.querySelector(".workspace-branch"),
   };
 
   const icon = (name, cls = "") =>
@@ -402,20 +416,69 @@
     return session ? session.approval : state.approval;
   };
 
+  function hunkGroups(file) {
+    const rows = parseDiff(file && file.diff);
+    const groups = [];
+    let current = null;
+    rows.forEach((row, rowIndex) => {
+      if (row.type === "hunk" || !current) {
+        current = {
+          index: groups.length,
+          header: row.type === "hunk" ? row.text : "Changes",
+          rows: [],
+          add: 0,
+          del: 0,
+        };
+        groups.push(current);
+        if (row.type === "hunk") return;
+      }
+      if (row.type === "add") current.add += 1;
+      if (row.type === "del") current.del += 1;
+      current.rows.push({ row, rowIndex });
+    });
+    return groups;
+  }
+
+  function hunkDecision(file, index) {
+    return (file && file.hunkDecisions && file.hunkDecisions[index]) || "";
+  }
+
+  function effectiveFileStats(file) {
+    const stats = { add: Number(file.add) || 0, del: Number(file.del) || 0 };
+    const decisions = file.hunkDecisions || {};
+    if (Object.keys(decisions).length) {
+      const groups = hunkGroups(file);
+      for (const group of groups) {
+        if (decisions[group.index] !== "revert") continue;
+        stats.add -= group.add;
+        stats.del -= group.del;
+      }
+    }
+    return {
+      add: Math.max(0, stats.add),
+      del: Math.max(0, stats.del),
+      staged: Boolean(file.staged),
+    };
+  }
+
   function changeStats(session) {
     if (!session || !session.changes || !session.changes.files) {
-      return { files: 0, add: 0, del: 0, reviewed: 0, comments: 0 };
+      return { files: 0, add: 0, del: 0, reviewed: 0, staged: 0, comments: 0 };
     }
     const comments = (session.reviewComments || []).length;
     return session.changes.files.reduce(
-      (total, file) => ({
-        files: total.files + 1,
-        add: total.add + file.add,
-        del: total.del + file.del,
-        reviewed: total.reviewed + (file.reviewed ? 1 : 0),
-        comments: total.comments + (file.comments || 0),
-      }),
-      { files: 0, add: 0, del: 0, reviewed: 0, comments }
+      (total, file) => {
+        const effective = effectiveFileStats(file);
+        return {
+          files: total.files + 1,
+          add: total.add + effective.add,
+          del: total.del + effective.del,
+          reviewed: total.reviewed + (file.reviewed ? 1 : 0),
+          staged: total.staged + (effective.staged ? 1 : 0),
+          comments: total.comments + (file.comments || 0),
+        };
+      },
+      { files: 0, add: 0, del: 0, reviewed: 0, staged: 0, comments }
     );
   }
 
@@ -567,8 +630,8 @@
     if (PERMISSIONS[prefs.approval]) state.approval = prefs.approval;
 
     if (!localStorage.getItem(STORAGE_KEY)) {
-      if (window.innerWidth < 1180) state.dockOpen = false;
-      if (window.innerWidth < 900) state.sidebarOpen = false;
+      if (window.innerWidth <= 1180) state.dockOpen = false;
+      if (window.innerWidth <= 900) state.sidebarOpen = false;
     }
   }
 
@@ -827,24 +890,30 @@
   function renderChangesCard(changes) {
     if (!changes || !changes.files || !changes.files.length) return "";
     const stats = changes.files.reduce(
-      (total, file) => ({
-        add: total.add + file.add,
-        del: total.del + file.del,
-        reviewed: total.reviewed + (file.reviewed ? 1 : 0),
-      }),
+      (total, file) => {
+        const effective = effectiveFileStats(file);
+        return {
+          add: total.add + effective.add,
+          del: total.del + effective.del,
+          reviewed: total.reviewed + (file.reviewed ? 1 : 0),
+        };
+      },
       { add: 0, del: 0, reviewed: 0 }
     );
     const files = changes.files
-      .map((file) => `
+      .map((file) => {
+        const effective = effectiveFileStats(file);
+        return `
         <button class="changes-file" type="button" data-open-file="${esc(file.path)}">
           <span class="changes-file-status ${file.status === "A" ? "add" : "mod"}">${esc(file.status)}</span>
           <span class="changes-file-path">${esc(file.path)}</span>
           <span class="changes-file-stat">
-            <span class="add">+${file.add}</span>
-            <span class="del">−${file.del}</span>
+            <span class="add">+${effective.add}</span>
+            <span class="del">−${effective.del}</span>
           </span>
         </button>
-      `)
+      `;
+      })
       .join("");
     return `
       <section class="changes-card">
@@ -919,12 +988,36 @@
       return renderNotice(message.text || "");
     }
     if (message.role === "user") {
+      const editing =
+        state.messageEdit &&
+        state.messageEdit.sessionId === session.id &&
+        state.messageEdit.index === index;
       return `
-        <article class="message user" data-message-index="${index}">
+        <article class="message user${editing ? " is-editing" : ""}" data-message-index="${index}">
           <div class="user-bubble">
-            <div class="user-label">${icon("at")}You<span class="user-time">${esc(message.time || "")}</span></div>
-            <div class="user-text">${esc(message.text || "")}</div>
+            <div class="user-label">You<span class="user-time">${esc(message.time || "")}</span></div>
+            ${
+              editing
+                ? `<div class="message-edit">
+                     <textarea id="messageEditInput" rows="3" aria-label="Edit message">${esc(message.text || "")}</textarea>
+                     <div class="message-edit-actions">
+                       <span class="message-edit-hint">⌘↵ resend · Esc cancel</span>
+                       <button class="btn ghost small" type="button" data-cancel-edit>Cancel</button>
+                       <button class="btn primary small" type="button" data-save-edit>${icon("arrow-up")}Save &amp; resend</button>
+                     </div>
+                   </div>`
+                : `<div class="user-text">${esc(message.text || "")}</div>`
+            }
             ${renderMessageAttachments(message.attachments)}
+          </div>
+          <div class="msg-actions">
+            <button class="msg-action" type="button" data-copy-message="${index}">${icon("copy")}copy</button>
+            ${
+              editing
+                ? ""
+                : `<button class="msg-action" type="button" data-edit-message="${index}">${icon("edit")}edit</button>`
+            }
+            <button class="msg-action" type="button" data-delete-message="${index}">${icon("trash")}delete</button>
           </div>
         </article>
       `;
@@ -933,8 +1026,8 @@
     return `
       <article class="message assistant" data-message-index="${index}">
         <header class="assistant-head">
-          <span class="assistant-avatar" aria-hidden="true">n</span>
           <span class="assistant-name">nulo</span>
+          <span class="assistant-sep" aria-hidden="true">·</span>
           <span class="assistant-model">${esc(modelLabel(session.model))}</span>
           <span class="assistant-time">${esc(message.time || "")}</span>
         </header>
@@ -942,7 +1035,9 @@
           ${renderAssistantBlocks(message, session)}
           <div class="msg-actions">
             <button class="msg-action" type="button" data-copy-message="${index}">${icon("copy")}copy</button>
-            <button class="msg-action" type="button" data-fork>${icon("fork")}fork</button>
+            <button class="msg-action" type="button" data-regenerate-message="${index}">${icon("refresh")}retry</button>
+            <button class="msg-action" type="button" data-branch-message="${index}">${icon("fork")}branch</button>
+            <button class="msg-action" type="button" data-delete-message="${index}">${icon("trash")}delete</button>
           </div>
         </div>
       </article>
@@ -982,7 +1077,6 @@
       .join("");
     return `
       <section class="welcome">
-        <span class="welcome-mark" aria-hidden="true">n</span>
         <div class="welcome-kicker">nulo desktop · ${esc(project.name)}</div>
         <h1 class="welcome-title">What should we build?</h1>
         <p class="welcome-sub">
@@ -1050,15 +1144,9 @@
   function renderTitlebar() {
     const project = activeProject();
     if (project) {
-      dom.workspaceName.textContent = project.name;
-      dom.workspaceIcon.textContent = project.name.slice(0, 1).toLowerCase();
-      dom.workspaceBranch.innerHTML = `<span class="branch-dot"></span>${esc(project.branch)}`;
+      dom.titlebarProject.textContent = project.name;
+      dom.titlebarBranch.textContent = project.branch;
     }
-    const active = Object.values(sessions).filter(
-      (session) => session.status === "running" || session.status === "awaiting"
-    ).length;
-    dom.runBadgeLabel.textContent = `${active} active`;
-    dom.runBadge.hidden = active === 0;
     dom.toggleSidebarBtn.classList.toggle("is-on", state.sidebarOpen);
     dom.toggleDockBtn.classList.toggle("is-on", state.dockOpen);
   }
@@ -1171,7 +1259,6 @@
             <div class="project-head">
               <button class="project-toggle" type="button" data-project-toggle="${esc(project.id)}" aria-expanded="${!collapsed}">
                 ${icon("chevron-down", `project-chevron${collapsed ? " is-collapsed" : ""}`)}
-                <span class="project-avatar tint-${esc(project.tint)}">${esc(project.name.slice(0, 1))}</span>
                 <span class="project-name">${esc(project.name)}</span>
                 <span class="project-count">${list.length}</span>
               </button>
@@ -1192,15 +1279,10 @@
     if (!session) {
       const project = activeProject();
       dom.sessionbar.innerHTML = `
-        <span class="sessionbar-project">${esc(project.name.slice(0, 1))}</span>
         <div class="sessionbar-main">
-          <div class="sessionbar-crumb">
-            <span class="crumb-name">${esc(project.name)}</span>
-            <span class="crumb-sep">/</span>
-            <span>${esc(project.branch)}</span>
-            <span class="crumb-env">${icon("globe")}Local</span>
-          </div>
           <div class="sessionbar-title-row">
+            <span class="sessionbar-path">${esc(project.name)}<span class="sessionbar-sep">/</span>${esc(project.branch)}</span>
+            <span class="sessionbar-sep">/</span>
             <h1 class="sessionbar-title">New session</h1>
             ${statusPill(null)}
           </div>
@@ -1223,27 +1305,21 @@
     const changesButton =
       stats.files > 0
         ? `<button class="changes-pill" type="button" data-open-changes title="Review changes">
-             ${icon("diff")}
              <span class="changes-text">${stats.files} file${stats.files === 1 ? "" : "s"}</span>
              <span class="add">+${stats.add}</span>
              <span class="del">−${stats.del}</span>
            </button>`
         : `<button class="changes-pill is-empty" type="button" data-open-changes title="No file changes yet">
-             ${icon("diff")}<span class="changes-text">No changes</span>
+             <span class="changes-text">No changes</span>
            </button>`;
     dom.sessionbar.innerHTML = `
-      <span class="sessionbar-project">${esc(project.name.slice(0, 1))}</span>
       <div class="sessionbar-main">
-        <div class="sessionbar-crumb">
-          <span class="crumb-name">${esc(project.name)}</span>
-          <span class="crumb-sep">/</span>
-          <span>${esc(session.branch)}</span>
-          <span class="crumb-env">${icon("globe")}${esc(envLabel)}</span>
-          ${lineage}
-        </div>
         <div class="sessionbar-title-row">
+          <span class="sessionbar-path">${esc(project.name)}<span class="sessionbar-sep">/</span>${esc(session.branch)}<span class="sessionbar-sep">·</span><span class="sessionbar-env">${esc(envLabel)}</span></span>
+          <span class="sessionbar-sep">/</span>
           <h1 class="sessionbar-title">${esc(session.title)}</h1>
           ${statusPill(session)}
+          ${lineage}
         </div>
       </div>
       <div class="sessionbar-actions">
@@ -1255,11 +1331,15 @@
           <div class="session-menu-popover" role="menu" hidden>
             <button class="session-menu-item" type="button" role="menuitem" data-session-action="rename">${icon("edit")}Rename</button>
             <button class="session-menu-item" type="button" role="menuitem" data-session-action="fork">${icon("fork")}Fork from here</button>
+            <button class="session-menu-item" type="button" role="menuitem" data-session-action="rewind">${icon("corner")}Rewind to checkpoint</button>
             <button class="session-menu-item" type="button" role="menuitem" data-session-action="copy-id">${icon("copy")}Copy session id</button>
             <span class="session-menu-sep"></span>
             <button class="session-menu-item is-danger" type="button" role="menuitem" data-session-action="delete">${icon("trash")}Delete session</button>
           </div>
         </div>
+        <button class="icon-btn" type="button" data-rewind aria-label="Rewind to checkpoint" title="Rewind to checkpoint">
+          ${icon("corner")}
+        </button>
         <button class="icon-btn" type="button" data-fork aria-label="Fork session" title="Fork session">
           ${icon("fork")}
         </button>
@@ -1391,60 +1471,77 @@
 
   function renderFileDiff(file, session) {
     if (!file) return "";
-    const sourceRows = parseDiff(file.diff);
     const comments = fileComments(session, file.path);
     const files = session.changes.files;
     const fileIndex = files.findIndex((item) => item.path === file.path);
-    const prev = files[(fileIndex - 1 + files.length) % files.length];
-    const next = files[(fileIndex + 1) % files.length];
-    const rows = sourceRows
-      .map((row, rowIndex) => {
-        if (row.type === "hunk") {
-          return `<div class="diff-row hunk"><span class="diff-code">${esc(row.text)}</span></div>`;
-        }
-        const label = row.new || row.old || String(rowIndex + 1);
-        const rowComments = comments.filter((comment) => comment.row === rowIndex);
-        const draft =
-          state.commentDraft &&
-          state.commentDraft.sessionId === session.id &&
-          state.commentDraft.file === file.path &&
-          state.commentDraft.row === rowIndex
-            ? `<div class="diff-note-composer">
-                 <div class="diff-note-head">${icon("message")}<span>Line ${esc(label)}</span></div>
-                 <textarea id="diffCommentInput" rows="2" placeholder="Leave a review note…" aria-label="Review note"></textarea>
-                 <div class="diff-note-actions">
-                   <button class="btn ghost small" type="button" data-cancel-comment>Cancel</button>
-                   <button class="btn primary small" type="button" data-save-comment>${icon("check")}Add note</button>
-                 </div>
-               </div>`
-            : "";
-        const notes = rowComments
-          .map(
-            (comment) => `
-              <div class="diff-note">
-                <span class="diff-note-icon">${icon("message")}</span>
-                <span class="diff-note-copy">
-                  <span class="diff-note-meta">line ${esc(comment.label)} · ${esc(comment.time || "")}</span>
-                  <span class="diff-note-text">${esc(comment.text)}</span>
-                </span>
-                <button class="diff-note-delete" type="button" data-delete-comment="${esc(comment.id)}" title="Delete note" aria-label="Delete note">${icon("x")}</button>
-              </div>
-            `
-          )
-          .join("");
-        return `
-          <div class="diff-row-wrap">
-            <div class="diff-row ${row.type}">
-              <span class="diff-num">${row.old === "" ? "" : row.old}</span>
-              <span class="diff-num">${row.new === "" ? "" : row.new}</span>
-              <span class="diff-sign">${row.type === "add" ? "+" : row.type === "del" ? "−" : " "}</span>
-              <span class="diff-code">${esc(row.text) || " "}</span>
-              <button class="diff-comment-btn" type="button" data-comment-line="${rowIndex}" data-comment-label="${esc(label)}" title="Add a review note on line ${esc(label)}" aria-label="Add a review note on line ${esc(label)}">${icon("message")}</button>
-            </div>
-            ${notes}
-            ${draft}
+    const groups = hunkGroups(file);
+    const effective = effectiveFileStats(file);
+    const rows = groups
+      .map((group) => {
+        const decision = hunkDecision(file, group.index);
+        const head = `
+          <div class="diff-hunk-head${decision ? ` is-${decision}` : ""}">
+            <span class="diff-hunk-range">${esc(group.header)}</span>
+            <span class="diff-hunk-stat"><span class="add">+${group.add}</span><span class="del">−${group.del}</span></span>
+            <span class="diff-hunk-actions">
+              ${
+                decision
+                  ? `<span class="diff-hunk-state">${decision === "keep" ? "kept" : "reverted"}</span>
+                     <button class="diff-hunk-btn" type="button" data-hunk-action="clear" data-hunk-index="${group.index}" aria-label="Undo hunk decision">undo</button>`
+                  : `<button class="diff-hunk-btn" type="button" data-hunk-action="keep" data-hunk-index="${group.index}" title="Keep this hunk applied">keep</button>
+                     <button class="diff-hunk-btn" type="button" data-hunk-action="revert" data-hunk-index="${group.index}" title="Discard this hunk">revert</button>`
+              }
+            </span>
           </div>
         `;
+        const body = group.rows
+          .map(({ row, rowIndex }) => {
+            const label = row.new || row.old || String(rowIndex + 1);
+            const rowComments = comments.filter((comment) => comment.row === rowIndex);
+            const draft =
+              state.commentDraft &&
+              state.commentDraft.sessionId === session.id &&
+              state.commentDraft.file === file.path &&
+              state.commentDraft.row === rowIndex
+                ? `<div class="diff-note-composer">
+                     <div class="diff-note-head">${icon("message")}<span>Line ${esc(label)}</span></div>
+                     <textarea id="diffCommentInput" rows="2" placeholder="Leave a review note…" aria-label="Review note"></textarea>
+                     <div class="diff-note-actions">
+                       <button class="btn ghost small" type="button" data-cancel-comment>Cancel</button>
+                       <button class="btn primary small" type="button" data-save-comment>${icon("check")}Add note</button>
+                     </div>
+                   </div>`
+                : "";
+            const notes = rowComments
+              .map(
+                (comment) => `
+                  <div class="diff-note">
+                    <span class="diff-note-icon">${icon("message")}</span>
+                    <span class="diff-note-copy">
+                      <span class="diff-note-meta">line ${esc(comment.label)} · ${esc(comment.time || "")}</span>
+                      <span class="diff-note-text">${esc(comment.text)}</span>
+                    </span>
+                    <button class="diff-note-delete" type="button" data-delete-comment="${esc(comment.id)}" title="Delete note" aria-label="Delete note">${icon("x")}</button>
+                  </div>
+                `
+              )
+              .join("");
+            return `
+              <div class="diff-row-wrap">
+                <div class="diff-row ${row.type}">
+                  <span class="diff-num">${row.old === "" ? "" : row.old}</span>
+                  <span class="diff-num">${row.new === "" ? "" : row.new}</span>
+                  <span class="diff-sign">${row.type === "add" ? "+" : row.type === "del" ? "−" : " "}</span>
+                  <span class="diff-code">${esc(row.text) || " "}</span>
+                  <button class="diff-comment-btn" type="button" data-comment-line="${rowIndex}" data-comment-label="${esc(label)}" title="Add a review note on line ${esc(label)}" aria-label="Add a review note on line ${esc(label)}">${icon("message")}</button>
+                </div>
+                ${notes}
+                ${draft}
+              </div>
+            `;
+          })
+          .join("");
+        return `<div class="diff-hunk${decision ? ` is-${decision}` : ""}" data-hunk-group="${group.index}">${head}${body}</div>`;
       })
       .join("");
     return `
@@ -1462,9 +1559,11 @@
         <div class="diff-body">${rows}</div>
         <div class="diff-foot">
           <button class="btn ghost small" type="button" data-copy-patch="${esc(file.path)}">${icon("copy")}Copy patch</button>
-          <button class="btn ghost small" type="button" data-open-folder>${icon("external")}Open folder</button>
+          <button class="btn ghost small" type="button" data-revert-file="${esc(file.path)}">${icon("corner")}Revert file</button>
+          <button class="btn ghost small${file.staged ? " is-staged" : ""}" type="button" data-stage-file="${esc(file.path)}">${file.staged ? `${icon("check")}Staged` : `${icon("plus")}Stage`}</button>
           <span class="spacer"></span>
-          <span class="dock-section-note">${comments.length ? `${comments.length} note${comments.length === 1 ? "" : "s"} · ` : ""}${file.add} added · ${file.del} removed</span>
+          <button class="text-link" type="button" data-open-editor>${icon("code")}Open in editor</button>
+          <span class="diff-foot-note">${comments.length ? `${comments.length} note${comments.length === 1 ? "" : "s"} · ` : ""}${effective.add} added · ${effective.del} removed</span>
         </div>
       </div>
     `;
@@ -1527,6 +1626,19 @@
             <span class="bar-add" style="width:${addPercent}%"></span>
             <span class="bar-del" style="width:${100 - addPercent}%"></span>
           </div>
+          <div class="commit-bar">
+            <span class="commit-copy">
+              <span>${stats.staged}/${stats.files} staged</span>
+              ${
+                session.lastCommit
+                  ? `<span class="commit-receipt" title="${esc(session.lastCommit.message)}">${icon("check")}${session.lastCommit.files} file${session.lastCommit.files === 1 ? "" : "s"} to ${esc(session.lastCommit.branch)} · ${esc(session.lastCommit.time)}</span>`
+                  : ""
+              }
+            </span>
+            <button class="btn ${stats.staged ? "primary" : "ghost"} small" type="button" data-commit-changes ${stats.staged ? "" : "disabled"}>
+              ${icon("check")}Commit…
+            </button>
+          </div>
           ${banner}
         </div>
       </section>
@@ -1540,6 +1652,7 @@
           ${session.changes.files
             .map((file) => {
               const notes = fileComments(session, file.path).length;
+              const effective = effectiveFileStats(file);
               return `
                 <div class="file-row${file.path === selectedFile.path ? " is-active" : ""}${file.reviewed ? " is-reviewed" : ""}"
                   role="button" tabindex="0" data-file="${esc(file.path)}" aria-label="Open diff for ${esc(file.path)}">
@@ -1549,7 +1662,8 @@
                   <span class="file-status ${file.status === "A" ? "add" : "mod"}">${esc(file.status)}</span>
                   <span class="file-path">${esc(file.path)}</span>
                   ${notes ? `<span class="file-comments" title="${notes} review note${notes === 1 ? "" : "s"}">${icon("message")}${notes}</span>` : ""}
-                  <span class="file-stats"><span class="add">+${file.add}</span><span class="del">−${file.del}</span></span>
+                  ${file.staged ? `<span class="file-staged" title="Staged for commit">${icon("check")}</span>` : ""}
+                  <span class="file-stats"><span class="add">+${effective.add}</span><span class="del">−${effective.del}</span></span>
                 </div>
               `;
             })
@@ -2010,7 +2124,7 @@
   function closePalette() {
     state.paletteOpen = false;
     dom.paletteOverlay.hidden = true;
-    dom.commandTrigger.focus({ preventScroll: true });
+    dom.sessionSearch.focus({ preventScroll: true });
   }
 
   /* ----------------------------------------------------------------------
@@ -2399,6 +2513,7 @@
     if (action === "rename") openSessionDialog("rename");
     else if (action === "delete") openSessionDialog("delete");
     else if (action === "fork") forkActiveSession();
+    else if (action === "rewind") openRewind();
     else if (action === "copy-id") copyText(session.id, "Session id copied");
   }
 
@@ -2408,6 +2523,26 @@
     state.dialogMode = mode;
     state.dialogReturnFocus = document.activeElement;
     dom.dialogOverlay.hidden = false;
+    if (mode === "commit") {
+      const stats = changeStats(session);
+      dom.dialogEyebrow.textContent = "Changes";
+      dom.dialogTitle.textContent = "Commit staged files";
+      dom.dialogDesc.textContent = `${stats.staged} of ${stats.files} file${stats.files === 1 ? "" : "s"} staged on ${session.branch}. Committed files leave the review list and land in the session log.`;
+      dom.dialogField.hidden = false;
+      dom.dialogFieldLabel.textContent = "Commit message";
+      dom.dialogInput.value =
+        session.lastCommit && session.lastCommit.message
+          ? session.lastCommit.message
+          : `Update ${stats.files} file${stats.files === 1 ? "" : "s"}`;
+      dom.dialogConfirm.textContent = "Commit";
+      dom.dialogConfirm.classList.remove("danger");
+      dom.dialogConfirm.classList.add("primary");
+      window.setTimeout(() => {
+        dom.dialogInput.focus();
+        dom.dialogInput.select();
+      }, 30);
+      return;
+    }
     dom.dialogEyebrow.textContent = "Session";
     dom.dialogTitle.textContent = mode === "delete" ? "Delete session" : "Rename session";
     dom.dialogDesc.textContent =
@@ -2415,6 +2550,7 @@
         ? `Delete “${session.title}”? The fixture session and its review notes will be removed. Child branches become roots.`
         : "Give this session a short name. The title is local to this prototype.";
     dom.dialogField.hidden = mode === "delete";
+    dom.dialogFieldLabel.textContent = "Session name";
     dom.dialogInput.value = session.title;
     dom.dialogConfirm.textContent = mode === "delete" ? "Delete" : "Save";
     dom.dialogConfirm.classList.toggle("danger", mode === "delete");
@@ -2461,6 +2597,36 @@
   function confirmSessionDialog() {
     const session = activeSession();
     if (!session || !state.dialogMode) return;
+    if (state.dialogMode === "commit") {
+      const message = dom.dialogInput.value.replace(/\s+/g, " ").trim();
+      const staged = session.changes && session.changes.files
+        ? session.changes.files.filter((file) => file.staged)
+        : [];
+      if (!message) {
+        toast("Write a commit message first", "warn", "alert");
+        dom.dialogInput.focus();
+        return;
+      }
+      if (!staged.length) {
+        toast("Stage at least one file first", "warn", "alert");
+        closeSessionDialog();
+        return;
+      }
+      const count = staged.length;
+      session.changes.files = session.changes.files.filter((file) => !file.staged);
+      session.changes.reviewed = session.changes.files.length ? allFilesReviewed(session) : false;
+      session.lastCommit = { message, files: count, branch: session.branch, time: clock() };
+      session.messages.push({
+        role: "notice",
+        text: `Committed ${count} file${count === 1 ? "" : "s"} to ${session.branch} · ${message}`,
+        time: clock(),
+      });
+      session.updated = "now";
+      closeSessionDialog();
+      refreshSession(session, { scroll: true });
+      toast(`Committed ${count} file${count === 1 ? "" : "s"} to ${session.branch}`, "info", "check");
+      return;
+    }
     if (state.dialogMode === "rename") {
       const title = dom.dialogInput.value.replace(/\s+/g, " ").trim();
       if (!title) {
@@ -2532,6 +2698,7 @@
     closeMentionMenu();
     clearAttachments(true);
     state.commentDraft = null;
+    state.messageEdit = null;
     state.welcome = false;
     state.activeId = id;
     state.projectForNew = session.project;
@@ -2545,6 +2712,7 @@
     closeMentionMenu();
     clearAttachments(true);
     state.commentDraft = null;
+    state.messageEdit = null;
     const project = projectById(projectId) || activeProject() || projects[0];
     state.welcome = true;
     state.projectForNew = project.id;
@@ -2557,6 +2725,7 @@
 
   function toggleSidebar() {
     state.sidebarOpen = !state.sidebarOpen;
+    state.autoClosedSidebar = false;
     savePrefs();
     applyShell();
     dom.toggleSidebarBtn.classList.toggle("is-on", state.sidebarOpen);
@@ -2564,9 +2733,43 @@
 
   function toggleDock() {
     state.dockOpen = !state.dockOpen;
+    state.autoClosedDock = false;
     savePrefs();
     applyShell();
     if (state.dockOpen) renderDock();
+  }
+
+  function syncResponsiveShell() {
+    const width = window.innerWidth;
+    const prev = state.lastViewportWidth ?? width;
+    state.lastViewportWidth = width;
+    let changed = false;
+
+    if (prev > 1180 && width <= 1180) {
+      if (state.dockOpen) {
+        state.dockOpen = false;
+        state.autoClosedDock = true;
+        changed = true;
+      }
+    } else if (prev <= 1180 && width > 1180 && state.autoClosedDock && !state.dockOpen) {
+      state.dockOpen = true;
+      state.autoClosedDock = false;
+      changed = true;
+    }
+
+    if (prev > 900 && width <= 900) {
+      if (state.sidebarOpen) {
+        state.sidebarOpen = false;
+        state.autoClosedSidebar = true;
+        changed = true;
+      }
+    } else if (prev <= 900 && width > 900 && state.autoClosedSidebar && !state.sidebarOpen) {
+      state.sidebarOpen = true;
+      state.autoClosedSidebar = false;
+      changed = true;
+    }
+
+    if (changed) applyShell();
   }
 
   function openDockTab(tab) {
@@ -2869,6 +3072,176 @@ retrying…`.trim();
     }, 950);
   }
 
+  function checkpointLabel(text) {
+    const clean = String(text || "").replace(/\s+/g, " ").trim();
+    if (!clean) return "Untitled turn";
+    return clean.length > 68 ? `${clean.slice(0, 65)}…` : clean;
+  }
+
+  function ensureCheckpoints(session) {
+    if (Array.isArray(session.checkpoints)) return session.checkpoints;
+    session.checkpoints = [];
+    session.messages.forEach((message, index) => {
+      if (message.role !== "user") return;
+      session.checkpoints.push({
+        id: `cp-seed-${index}`,
+        label: checkpointLabel(message.text),
+        time: message.time || "",
+        index,
+        messages: clone(session.messages.slice(0, index)),
+        changes: null,
+        plan: null,
+        lastCommit: null,
+      });
+    });
+    return session.checkpoints;
+  }
+
+  function captureCheckpoint(session, label) {
+    if (!session) return;
+    ensureCheckpoints(session);
+    session.checkpoints.push({
+      id: `cp-${Date.now()}-${session.checkpoints.length}`,
+      label: checkpointLabel(label),
+      time: clock(),
+      index: session.messages.length,
+      messages: clone(session.messages),
+      changes: session.changes ? clone(session.changes) : null,
+      plan: session.plan ? clone(session.plan) : null,
+      lastCommit: session.lastCommit ? clone(session.lastCommit) : null,
+    });
+    if (session.checkpoints.length > 24) {
+      session.checkpoints.splice(0, session.checkpoints.length - 24);
+    }
+  }
+
+  function renderRewind() {
+    const session = sessions[state.rewindSessionId];
+    if (!session) return;
+    const checkpoints = ensureCheckpoints(session);
+    const rows = [...checkpoints]
+      .reverse()
+      .map((checkpoint) => {
+        const index = checkpoints.indexOf(checkpoint);
+        const selected = index === state.rewindIndex;
+        const removed = Math.max(0, session.messages.length - checkpoint.messages.length);
+        const files = checkpoint.changes && checkpoint.changes.files ? checkpoint.changes.files.length : 0;
+        return `
+          <button class="rewind-row${selected ? " is-selected" : ""}" type="button" role="option"
+            aria-selected="${selected}" data-rewind-checkpoint="${index}">
+            <span class="rewind-rail" aria-hidden="true"></span>
+            <span class="rewind-copy">
+              <span class="rewind-label">${esc(checkpoint.label)}</span>
+              <span class="rewind-meta">${esc(checkpoint.time || "earlier")} · ${removed} message${removed === 1 ? "" : "s"} after · ${files ? `${files} file${files === 1 ? "" : "s"} in snapshot` : "no file snapshot"}</span>
+            </span>
+            <span class="rewind-check">${selected ? icon("check") : ""}</span>
+          </button>
+        `;
+      })
+      .join("");
+    dom.rewindList.innerHTML = rows || `<div class="rewind-empty">This session has no checkpoints yet. Send a message to create one.</div>`;
+    const selected = checkpoints[state.rewindIndex];
+    const hasFiles = Boolean(selected && selected.changes);
+    dom.rewindFiles.disabled = !hasFiles;
+    dom.rewindFiles.checked = hasFiles;
+    dom.rewindFilesRow.classList.toggle("is-disabled", !hasFiles);
+    dom.rewindDesc.textContent = selected
+      ? `Restore the thread to just before “${checkpointLabel(selected.label)}”. ${hasFiles ? "File changes from that checkpoint can be restored too." : "This checkpoint has no file snapshot; the current changes stay as they are."}`
+      : "Restore the thread to an earlier turn.";
+    dom.rewindConfirm.disabled = !selected;
+  }
+
+  function openRewind() {
+    const session = activeSession();
+    if (!session) return;
+    ensureCheckpoints(session);
+    if (!session.checkpoints.length) {
+      toast("No checkpoints yet · send a message first", "warn", "clock");
+      return;
+    }
+    state.rewindSessionId = session.id;
+    state.rewindIndex = session.checkpoints.length - 1;
+    const opener = document.activeElement;
+    state.rewindReturnFocus =
+      opener && opener.offsetParent !== null ? opener : dom.sessionbar.querySelector("[data-rewind]");
+    dom.rewindOverlay.hidden = false;
+    renderRewind();
+    window.setTimeout(() => {
+      const selected = dom.rewindList.querySelector(".rewind-row.is-selected");
+      if (selected) selected.focus({ preventScroll: true });
+      else dom.rewindConfirm.focus();
+    }, 30);
+  }
+
+  function closeRewind() {
+    state.rewindSessionId = null;
+    dom.rewindOverlay.hidden = true;
+    if (state.rewindReturnFocus && document.body.contains(state.rewindReturnFocus)) {
+      state.rewindReturnFocus.focus({ preventScroll: true });
+    }
+    state.rewindReturnFocus = null;
+  }
+
+  function rewindToCheckpoint() {
+    const session = sessions[state.rewindSessionId];
+    const checkpoint = session && session.checkpoints ? session.checkpoints[state.rewindIndex] : null;
+    if (!session || !checkpoint) return;
+    const removed = Math.max(0, session.messages.length - checkpoint.messages.length);
+    const restoreFiles = dom.rewindFiles.checked && Boolean(checkpoint.changes);
+    state.messageEdit = null;
+    clearSessionTimers(session);
+    session.messages = clone(checkpoint.messages);
+    if (restoreFiles) session.changes = clone(checkpoint.changes);
+    session.plan = checkpoint.plan ? clone(checkpoint.plan) : null;
+    session.lastCommit = checkpoint.lastCommit ? clone(checkpoint.lastCommit) : null;
+    session.messages.push({
+      role: "notice",
+      text: `${removed ? `${removed} message${removed === 1 ? "" : "s"} removed · ` : ""}rewound to checkpoint${restoreFiles ? " · file changes restored" : ""}`,
+      time: clock(),
+    });
+    session.status = "paused";
+    session.updated = "now";
+    session.checkpoints = session.checkpoints.filter((item) => item.index <= checkpoint.index);
+    state.rewindIndex = Math.max(0, session.checkpoints.length - 1);
+    closeRewind();
+    refreshSession(session, { scroll: true });
+    toast(`Rewound${removed ? ` · ${removed} message${removed === 1 ? "" : "s"} removed` : ""}`, "info", "corner");
+  }
+
+  function forkSessionAt(session, index, label) {
+    if (!session) return;
+    if (session.status === "running") {
+      toast("Branch opens when the current turn settles", "warn", "alert");
+      return;
+    }
+    state.sessionCounter += 1;
+    const id = `fork-${state.sessionCounter}`;
+    const copy = clone(session);
+    copy.id = id;
+    copy.parent = session.id;
+    copy.forkedFrom = session.title;
+    copy.title = `${session.title} · ${label || "fork"}`;
+    copy.messages = copy.messages.slice(0, index + 1);
+    copy.checkpoints = [];
+    copy.status = "done";
+    copy.reviewComments = [];
+    copy.lastCommit = null;
+    if (copy.changes && Array.isArray(copy.changes.files)) {
+      for (const file of copy.changes.files) {
+        file.reviewed = false;
+        file.staged = false;
+      }
+      copy.changes.reviewed = false;
+    }
+    copy.started = "just now";
+    copy.updated = "now";
+    sessions[id] = copy;
+    const project = projectById(copy.project);
+    if (project) project.sessions.unshift(id);
+    switchSession(id);
+    return copy;
+  }
+
   function forkActiveSession() {
     const session = activeSession();
     if (!session) {
@@ -2879,26 +3252,123 @@ retrying…`.trim();
       toast("Fork opens when the current turn settles", "warn", "alert");
       return;
     }
-    state.sessionCounter += 1;
-    const id = `fork-${state.sessionCounter}`;
-    const copy = clone(session);
-    copy.id = id;
-    copy.parent = session.id;
-    copy.forkedFrom = session.title;
-    copy.title = `${session.title} · fork`;
-    copy.status = "done";
-    copy.reviewComments = [];
-    if (copy.changes && Array.isArray(copy.changes.files)) {
-      for (const file of copy.changes.files) file.reviewed = false;
-      copy.changes.reviewed = false;
-    }
-    copy.started = "just now";
-    copy.updated = "now";
-    sessions[id] = copy;
-    const project = projectById(copy.project);
-    if (project) project.sessions.unshift(id);
-    switchSession(id);
+    if (!forkSessionAt(session, session.messages.length - 1, "fork")) return;
     toast("Forked from the current leaf", "info", "fork");
+  }
+
+  function startMessageEdit(index) {
+    const session = activeSession();
+    const message = session ? session.messages[index] : null;
+    if (!session || !message || message.role !== "user") return;
+    if (session.status === "running" || session.status === "awaiting") {
+      toast("Edit opens when the current turn settles", "warn", "clock");
+      return;
+    }
+    state.messageEdit = { sessionId: session.id, index };
+    renderConversation();
+    window.requestAnimationFrame(() => {
+      const input = document.getElementById("messageEditInput");
+      if (!input) return;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+  }
+
+  function cancelMessageEdit() {
+    if (!state.messageEdit) return;
+    state.messageEdit = null;
+    renderConversation();
+  }
+
+  function saveMessageEdit() {
+    const session = activeSession();
+    const edit = state.messageEdit;
+    if (!session || !edit || edit.sessionId !== session.id) return;
+    const input = document.getElementById("messageEditInput");
+    const text = input ? input.value.trim() : "";
+    if (!text) {
+      toast("Message cannot be empty", "warn", "alert");
+      if (input) input.focus();
+      return;
+    }
+    const message = session.messages[edit.index];
+    if (!message) return;
+    captureCheckpoint(session, `Before edit: ${checkpointLabel(text)}`);
+    session.messages = session.messages.slice(0, edit.index + 1);
+    message.text = text;
+    message.time = clock();
+    state.messageEdit = null;
+    session.status = "running";
+    session.updated = "now";
+    renderSessionbar();
+    renderConversation();
+    renderDock();
+    scrollToBottom(true);
+    simulateReply(session, text);
+    toast("Message updated · reply regenerating", "info", "refresh");
+  }
+
+  function regenerateMessage(index) {
+    const session = activeSession();
+    if (!session) return;
+    if (session.status === "running" || session.status === "awaiting") {
+      toast("Retry opens when the current turn settles", "warn", "clock");
+      return;
+    }
+    const message = session.messages[index];
+    if (!message || message.role !== "assistant") return;
+    let prompt = "";
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      if (session.messages[cursor].role === "user") {
+        prompt = session.messages[cursor].text || "";
+        break;
+      }
+    }
+    if (!prompt) {
+      toast("No prompt to retry from", "warn", "alert");
+      return;
+    }
+    state.messageEdit = null;
+    const removed = session.messages.length - index;
+    captureCheckpoint(session, `Before retry: ${checkpointLabel(prompt)}`);
+    session.messages = session.messages.slice(0, index);
+    session.status = "running";
+    session.updated = "now";
+    renderSessionbar();
+    renderConversation();
+    renderDock();
+    scrollToBottom(true);
+    simulateReply(session, prompt);
+    toast(`Retrying turn${removed > 1 ? ` · ${removed - 1} later message${removed - 1 === 1 ? "" : "s"} dropped` : ""}`, "info", "refresh");
+  }
+
+  function branchFromMessage(index) {
+    const session = activeSession();
+    const message = session ? session.messages[index] : null;
+    if (!session || !message) return;
+    state.messageEdit = null;
+    if (!forkSessionAt(session, index, "branch")) return;
+    toast("Branched from this message", "info", "fork");
+  }
+
+  function deleteMessage(index) {
+    const session = activeSession();
+    const message = session ? session.messages[index] : null;
+    if (!session || !message) return;
+    if (session.status === "running") {
+      toast("Delete opens when the current turn settles", "warn", "clock");
+      return;
+    }
+    state.messageEdit = null;
+    captureCheckpoint(session, "Before deleting a message");
+    session.messages.splice(index, 1);
+    if (session.status === "awaiting" && !pendingApproval(session)) session.status = "paused";
+    session.updated = "now";
+    renderConversation();
+    renderSessionbar();
+    renderSidebar();
+    renderDock();
+    toast("Message removed · rewind to restore it", "info", "trash");
   }
 
   /* ----------------------------------------------------------------------
@@ -2984,7 +3454,7 @@ retrying…`.trim();
   function autoGrowComposer() {
     const input = dom.composerInput;
     input.style.height = "auto";
-    input.style.height = `${Math.min(184, Math.max(52, input.scrollHeight))}px`;
+    input.style.height = `${Math.min(196, Math.max(58, input.scrollHeight))}px`;
   }
 
   function sessionTitleFromPrompt(prompt) {
@@ -3185,6 +3655,8 @@ retrying…`.trim();
       createSession(prompt, attachments);
       return;
     }
+
+    captureCheckpoint(session, `Before: ${checkpointLabel(prompt)}`);
 
     if (session.status === "running") {
       session.messages.push({ role: "user", text: prompt, time: clock(), attachments });
@@ -3596,18 +4068,8 @@ retrying…`.trim();
      ---------------------------------------------------------------------- */
 
   function bindEvents() {
-    dom.commandTrigger.addEventListener("click", openPalette);
     dom.toggleSidebarBtn.addEventListener("click", toggleSidebar);
     dom.toggleDockBtn.addEventListener("click", toggleDock);
-    dom.settingsBtn.addEventListener("click", () => openSettings("general"));
-    dom.runBadge.addEventListener("click", () => {
-      state.filter = "active";
-      state.sidebarOpen = true;
-      applyShell();
-      renderFilterRow();
-      renderSidebar();
-      toast("Showing active sessions", "info", "sparkles");
-    });
 
     dom.newSessionBtn.addEventListener("click", () => startWelcome());
     dom.sessionSearch.addEventListener("input", () => {
@@ -3641,7 +4103,6 @@ retrying…`.trim();
     });
     dom.capabilitiesBtn.addEventListener("click", () => openSettings("capabilities"));
     dom.sidebarSettingsBtn.addEventListener("click", () => openSettings("general"));
-    dom.accountRow.addEventListener("click", () => openSettings("about"));
 
     dom.sessionbar.addEventListener("click", (event) => {
       const menuButton = event.target.closest("[data-session-menu]");
@@ -3667,6 +4128,10 @@ retrying…`.trim();
       }
       if (event.target.closest("[data-open-changes]")) {
         openDockTab("changes");
+        return;
+      }
+      if (event.target.closest("[data-rewind]")) {
+        openRewind();
         return;
       }
       if (event.target.closest("[data-fork]")) {
@@ -3921,6 +4386,34 @@ retrying…`.trim();
         if (message) copyText(messagePlainText(message), "Message copied");
         return;
       }
+      const editButton = event.target.closest("[data-edit-message]");
+      if (editButton) {
+        startMessageEdit(Number(editButton.dataset.editMessage));
+        return;
+      }
+      if (event.target.closest("[data-save-edit]")) {
+        saveMessageEdit();
+        return;
+      }
+      if (event.target.closest("[data-cancel-edit]")) {
+        cancelMessageEdit();
+        return;
+      }
+      const regenerateButton = event.target.closest("[data-regenerate-message]");
+      if (regenerateButton) {
+        regenerateMessage(Number(regenerateButton.dataset.regenerateMessage));
+        return;
+      }
+      const branchButton = event.target.closest("[data-branch-message]");
+      if (branchButton) {
+        branchFromMessage(Number(branchButton.dataset.branchMessage));
+        return;
+      }
+      const deleteButton = event.target.closest("[data-delete-message]");
+      if (deleteButton) {
+        deleteMessage(Number(deleteButton.dataset.deleteMessage));
+        return;
+      }
       const recent = event.target.closest("[data-recent-session]");
       if (recent) {
         switchSession(recent.dataset.recentSession);
@@ -3938,6 +4431,19 @@ retrying…`.trim();
       }
     });
 
+    dom.conversation.addEventListener("keydown", (event) => {
+      if (!state.messageEdit || event.target.id !== "messageEditInput") return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelMessageEdit();
+        return;
+      }
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        saveMessageEdit();
+      }
+    });
+
     dom.dockHeader.addEventListener("click", (event) => {
       const tab = event.target.closest("[data-dock-tab]");
       if (tab) openDockTab(tab.dataset.dockTab);
@@ -3946,6 +4452,82 @@ retrying…`.trim();
 
     dom.dockBody.addEventListener("click", (event) => {
       const session = activeSession();
+
+      const hunkButton = event.target.closest("[data-hunk-action]");
+      if (hunkButton && session && session.changes) {
+        const path = state.selectedFile[session.id];
+        const file = session.changes.files.find((item) => item.path === path);
+        if (!file) return;
+        const index = String(hunkButton.dataset.hunkIndex);
+        const action = hunkButton.dataset.hunkAction;
+        file.hunkDecisions = file.hunkDecisions || {};
+        if (action === "clear") delete file.hunkDecisions[index];
+        else file.hunkDecisions[index] = action;
+        if (action !== "clear") {
+          file.reviewed = false;
+          file.staged = false;
+        }
+        session.changes.reviewed = allFilesReviewed(session);
+        renderDock();
+        renderSessionbar();
+        renderSidebar();
+        syncReviewSummary();
+        toast(
+          action === "revert"
+            ? "Hunk reverted · stats updated"
+            : action === "keep"
+              ? "Hunk kept"
+              : "Hunk decision undone",
+          action === "revert" ? "warn" : "info",
+          action === "revert" ? "corner" : "check"
+        );
+        return;
+      }
+
+      const revertFileButton = event.target.closest("[data-revert-file]");
+      if (revertFileButton && session && session.changes) {
+        const file = session.changes.files.find((item) => item.path === revertFileButton.dataset.revertFile);
+        if (!file) return;
+        const groups = hunkGroups(file);
+        file.hunkDecisions = {};
+        for (const group of groups) file.hunkDecisions[group.index] = "revert";
+        file.reviewed = false;
+        file.staged = false;
+        session.changes.reviewed = allFilesReviewed(session);
+        renderDock();
+        renderSessionbar();
+        renderSidebar();
+        syncReviewSummary();
+        toast(`${file.path.split("/").pop()} · all hunks reverted`, "warn", "corner");
+        return;
+      }
+
+      const stageFileButton = event.target.closest("[data-stage-file]");
+      if (stageFileButton && session && session.changes) {
+        const file = session.changes.files.find((item) => item.path === stageFileButton.dataset.stageFile);
+        if (!file) return;
+        file.staged = !file.staged;
+        renderDock();
+        toast(`${file.path.split("/").pop()} · ${file.staged ? "staged" : "unstaged"}`, "info", "check");
+        return;
+      }
+
+      if (event.target.closest("[data-commit-changes]")) {
+        if (!session || !session.changes) return;
+        const stats = changeStats(session);
+        if (!stats.staged) {
+          toast("Stage a file before committing", "warn", "alert");
+          return;
+        }
+        openSessionDialog("commit");
+        return;
+      }
+
+      if (event.target.closest("[data-open-editor]")) {
+        toast("Open in editor is host-owned", "info", "external");
+        return;
+      }
+
       const reviewFile = event.target.closest("[data-review-file]");
       if (reviewFile && session && session.changes) {
         const file = session.changes.files.find((item) => item.path === reviewFile.dataset.reviewFile);
@@ -4143,6 +4725,38 @@ retrying…`.trim();
         closeSessionDialog();
       }
     });
+    dom.rewindOverlay.addEventListener("click", (event) => {
+      if (event.target === dom.rewindOverlay) closeRewind();
+    });
+    dom.rewindList.addEventListener("click", (event) => {
+      const row = event.target.closest("[data-rewind-checkpoint]");
+      if (!row) return;
+      state.rewindIndex = Number(row.dataset.rewindCheckpoint);
+      renderRewind();
+      const selected = dom.rewindList.querySelector(".rewind-row.is-selected");
+      if (selected) selected.focus({ preventScroll: true });
+    });
+    dom.rewindClose.addEventListener("click", closeRewind);
+    dom.rewindCancel.addEventListener("click", closeRewind);
+    dom.rewindConfirm.addEventListener("click", rewindToCheckpoint);
+    dom.rewindOverlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeRewind();
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        const session = sessions[state.rewindSessionId];
+        if (!session) return;
+        event.preventDefault();
+        const delta = event.key === "ArrowDown" ? -1 : 1;
+        state.rewindIndex = Math.max(0, Math.min(session.checkpoints.length - 1, state.rewindIndex + delta));
+        renderRewind();
+        const selected = dom.rewindList.querySelector(".rewind-row.is-selected");
+        if (selected) selected.focus({ preventScroll: true });
+      }
+    });
     dom.settingsNav.addEventListener("click", (event) => {
       const item = event.target.closest("[data-settings-section]");
       if (!item) return;
@@ -4233,6 +4847,7 @@ retrying…`.trim();
     dom.paletteOverlay.addEventListener("keydown", (event) => trapFocus(event, dom.paletteOverlay));
     dom.settingsOverlay.addEventListener("keydown", (event) => trapFocus(event, dom.settingsOverlay));
     dom.dialogOverlay.addEventListener("keydown", (event) => trapFocus(event, dom.dialogOverlay));
+    dom.rewindOverlay.addEventListener("keydown", (event) => trapFocus(event, dom.rewindOverlay));
 
     document.addEventListener("keydown", (event) => {
       const target = event.target;
@@ -4292,6 +4907,10 @@ retrying…`.trim();
         return;
       }
       if (event.key === "Escape") {
+        if (state.rewindSessionId) {
+          closeRewind();
+          return;
+        }
         if (state.dialogMode) {
           closeSessionDialog();
           return;
@@ -4329,6 +4948,8 @@ retrying…`.trim();
         syncSlashMenu();
       }
     });
+
+    window.addEventListener("resize", syncResponsiveShell);
 
     dom.composerInput.addEventListener("blur", () => {
       window.setTimeout(() => {
@@ -4375,8 +4996,8 @@ retrying…`.trim();
     dom.dockResizer.addEventListener("pointerup", finish);
     dom.dockResizer.addEventListener("pointercancel", finish);
     dom.dockResizer.addEventListener("dblclick", () => {
-      state.dockWidth = 404;
-      dom.workbench.style.setProperty("--dock-w", "404px");
+      state.dockWidth = 420;
+      dom.workbench.style.setProperty("--dock-w", "420px");
       savePrefs();
       toast("Dock width reset", "info", "panel-right");
     });
@@ -4384,6 +5005,15 @@ retrying…`.trim();
 
   function init() {
     loadPrefs();
+    if (window.innerWidth <= 1180 && state.dockOpen) {
+      state.dockOpen = false;
+      state.autoClosedDock = true;
+    }
+    if (window.innerWidth <= 900 && state.sidebarOpen) {
+      state.sidebarOpen = false;
+      state.autoClosedSidebar = true;
+    }
+    state.lastViewportWidth = window.innerWidth;
     applyShell();
     bindEvents();
     bindDocumentAndPanelEvents();

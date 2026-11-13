@@ -85,32 +85,18 @@
       <span class="brand-name">nulo</span>
     </div>
 
-    <div class="workspace-chip" title="Workspace">
-      <span class="workspace-icon" aria-hidden="true">n</span>
-      <span class="workspace-name">nulo</span>
-      <span class="workspace-branch"><span class="branch-dot"></span>main</span>
+    <div class="titlebar-path" title="nulo / main">
+      <span class="titlebar-project">nulo</span>
+      <span class="titlebar-sep" aria-hidden="true">/</span>
+      <span class="titlebar-branch">main</span>
     </div>
 
-    <button class="command-trigger" id="commandTrigger" aria-label="Search sessions and commands">
-      <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
-      <span class="command-trigger-label">Search sessions and commands</span>
-      <kbd>Ctrl K</kbd>
-    </button>
-
     <div class="titlebar-actions">
-      <button class="run-badge" id="runBadge" title="Show active sessions">
-        <span class="pulse-dot" aria-hidden="true"></span>
-        <span id="runBadgeLabel">2 active</span>
-      </button>
-      <div class="titlebar-divider" aria-hidden="true"></div>
       <button class="icon-btn" id="toggleSidebarBtn" aria-label="Toggle sidebar" title="Toggle sidebar · Ctrl B">
         <svg class="icon" aria-hidden="true"><use href="#i-panel-left"/></svg>
       </button>
       <button class="icon-btn is-on" id="toggleDockBtn" aria-label="Toggle right panel" title="Toggle right panel · Ctrl J">
         <svg class="icon" aria-hidden="true"><use href="#i-panel-right"/></svg>
-      </button>
-      <button class="icon-btn" id="settingsBtn" aria-label="Settings" title="Settings · Ctrl ,">
-        <svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg>
       </button>
     </div>
   </header>
@@ -121,13 +107,11 @@
         <button class="new-session-btn" id="newSessionBtn">
           <svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>
           <span>New session</span>
-          <kbd>Ctrl N</kbd>
         </button>
 
         <label class="sidebar-search" for="sessionSearch">
           <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
-          <input id="sessionSearch" type="search" placeholder="Filter sessions" autocomplete="off" spellcheck="false">
-          <kbd>Ctrl F</kbd>
+          <input id="sessionSearch" type="search" placeholder="Search sessions" autocomplete="off" spellcheck="false">
         </label>
 
         <div class="filter-row" id="filterRow" role="tablist" aria-label="Filter sessions"></div>
@@ -139,20 +123,10 @@
         <button class="sidebar-link" id="capabilitiesBtn">
           <svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg>
           <span>Capabilities</span>
-          <span class="count-badge">3</span>
         </button>
         <button class="sidebar-link" id="sidebarSettingsBtn">
           <svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg>
           <span>Settings</span>
-          <kbd>Ctrl ,</kbd>
-        </button>
-        <button class="account-row" id="accountRow" title="Local runtime">
-          <span class="account-avatar">C</span>
-          <span class="account-copy">
-            <strong>crazy</strong>
-            <small>local · cgo</small>
-          </span>
-          <span class="account-status" aria-label="Connected"></span>
         </button>
       </div>
     </aside>
@@ -293,6 +267,30 @@
     <footer class="mini-dialog-actions">
       <button class="btn ghost" type="button" id="dialogCancel">Cancel</button>
       <button class="btn primary" type="button" id="dialogConfirm">Save</button>
+    </footer>
+  </section>
+</div>
+
+<div class="overlay rewind-overlay" id="rewindOverlay" hidden>
+  <section class="mini-dialog rewind-dialog" role="dialog" aria-modal="true" aria-labelledby="rewindTitle">
+    <header class="mini-dialog-head">
+      <div>
+        <p class="eyebrow">Session</p>
+        <h2 id="rewindTitle">Rewind to checkpoint</h2>
+      </div>
+      <button class="icon-btn" id="rewindClose" type="button" aria-label="Close rewind">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </header>
+    <p class="mini-dialog-desc" id="rewindDesc">Restore the thread to an earlier turn. File state is restored when this checkpoint captured a snapshot.</p>
+    <div class="rewind-list" id="rewindList" role="listbox" aria-label="Checkpoints"></div>
+    <label class="rewind-files" id="rewindFilesRow">
+      <input type="checkbox" id="rewindFiles" checked>
+      <span>Also restore file changes</span>
+    </label>
+    <footer class="mini-dialog-actions">
+      <button class="btn ghost" type="button" id="rewindCancel">Cancel</button>
+      <button class="btn primary" type="button" id="rewindConfirm" disabled>Restore checkpoint</button>
     </footer>
   </section>
 </div>

@@ -42,13 +42,15 @@ python -m http.server 8765
 
 - **审批**：`go test ./sdk/...` 的 Allow once / Always allow / Deny 都会改变会话状态、plan、
   terminal 和后续消息。
-- **Changes**：切换文件、查看 diff、复制 patch、逐文件勾选 reviewed、全部标记 reviewed、文件前后导航、在 diff 行上添加/删除 review note；审批未完成时会有跨面板提示。
+- **Changes**：切换文件、查看 diff、复制 patch、逐文件勾选 reviewed、全部标记 reviewed、文件前后导航、在 diff 行上添加/删除 review note；审批未完成时会有跨面板提示。diff 支持按 hunk keep / revert / undo，单文件 Revert file、Stage，以及暂存后的 Commit 对话框；Open in editor 是 host 占位。
 - **Model**：8 个模型 / 3 个 provider，切换后 composer、context 和 model 卡片同步；
   thinking level 也在同一个弹层里。
 - **附件**：paperclip 选择文件、拖拽到 composer、粘贴图片；附件会进入发送后的用户消息。
 - **@ 文件**：输入 `@` 打开文件菜单，支持过滤、上下选择和插入路径。
 - **代码块**：assistant 消息里的 fenced code block 带语言标签和 copy 按钮。
 - **会话管理**：sessionbar 的更多菜单支持重命名、fork、复制 session id、删除；删除会处理子分支和当前会话切换。
+- **Checkpoint / Rewind**：sessionbar 的 Rewind（或更多菜单）可以回到任意一次发送、编辑、重试或删除消息之前；勾选 “Also restore file changes” 会一并恢复该 checkpoint 捕获的 diff 快照，未捕获快照的早期 checkpoint 只回退对话。
+- **消息操作**：用户消息可 inline 编辑并重发（⌘/Ctrl+Enter 保存，Esc 取消），assistant 消息可 copy / retry / branch / delete；分支会新建子会话。
 - **失败与重试**：`Codemode sandbox limits` 里有一个失败的工具卡；Retry 会重新跑一次并更新 plan。
 - **Permission**：Manual / Auto edits / Plan only / Auto；`Shift+Tab` 可循环切换。
 - **Environment**：Local / Worktree 预览。
