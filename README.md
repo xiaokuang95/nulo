@@ -12,12 +12,31 @@ svcs, err := sdk.CreateAgentSessionServices(sdk.CreateAgentSessionServicesOption
 
 Config root: `~/.nulo/agent` (`NULO_HOME` / `NULO_CODING_AGENT_DIR`).
 
+## Host surface
+
+Besides the session lifecycle, the public SDK exposes what a desktop or TUI host
+needs to render around a session:
+
+- `ListAllSessions(agentDir)` lists session files across every working directory,
+  newest first, so a host can build a project switcher before choosing a CWD.
+- `ListProviders(agentDir)` resolves `models.json` into provider names, endpoints,
+  context windows, output limits and image/reasoning flags.
+- `RuntimeOptions.ApproveTool` installs a default approval hook for sessions
+  created, resumed or forked by that runtime. `SessionStartOptions.ApproveTool`
+  overrides it per session. A denial becomes a tool error; returning an error
+  aborts the turn.
+- `Session.Branch` / `LeafID`, `NavigateTree`, `Compact`, `File` and the existing
+  event subscription give a host enough state for rewind, fork and usage views.
+- `Runtime.Close` disposes the current session; `AgentSessionServices.Close`
+  releases MCP connections, plugins and other service resources. A runtime is not
+  safe for concurrent use.
+
 ## Plugins
 
 Plugins have two host modes, neither of which starts Node:
 
-1. **Shared library** ¡ª an in-process `.dll`/`.so`/`.dylib` exporting the C ABI.
-2. **Protocol** ¡ª a separate executable speaking newline-delimited JSON over
+1. **Shared library** â€” an in-process `.dll`/`.so`/`.dylib` exporting the C ABI.
+2. **Protocol** â€” a separate executable speaking newline-delimited JSON over
    stdin/stdout (the `plugin.json` manifest selects `"protocol": "stdio"`).
 
 The Go SDK is the same for both. A shared-library plugin uses the `cabi`

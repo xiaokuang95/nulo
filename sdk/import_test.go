@@ -57,6 +57,7 @@ func checkPackageImports(t *testing.T, importPath string, groups ...[]string) {
 	isSDK := rel == "sdk"
 	isPluginSDK := rel == "sdk/plugin" || strings.HasPrefix(rel, "sdk/plugin/")
 	isPublicSDK := isSDK || isPluginSDK
+	isHostApp := strings.HasPrefix(rel, "application/")
 	isInternal := strings.HasPrefix(rel, "sdk/internal/")
 	internalName := ""
 	if isInternal {
@@ -72,16 +73,16 @@ func checkPackageImports(t *testing.T, importPath string, groups ...[]string) {
 				continue
 			}
 			if imp == modulePath+"/sdk" {
-				if !isPublicSDK && !isInternal && !strings.HasPrefix(rel, "examples/") {
-					t.Errorf("%s must not import %s (only sdk and examples may)", importPath, imp)
+				if !isPublicSDK && !isInternal && !isHostApp && !strings.HasPrefix(rel, "examples/") {
+					t.Errorf("%s must not import %s (only sdk, examples, and application hosts may)", importPath, imp)
 				}
 				continue
 			}
 			if imp == modulePath+"/sdk/plugin" || strings.HasPrefix(imp, modulePath+"/sdk/plugin/") {
-				if isPublicSDK || isInternal || strings.HasPrefix(rel, "examples/") {
+				if isPublicSDK || isInternal || isHostApp || strings.HasPrefix(rel, "examples/") {
 					continue
 				}
-				t.Errorf("%s imports plugin SDK %s (only sdk and examples may)", importPath, imp)
+				t.Errorf("%s imports plugin SDK %s (only sdk, examples, and application hosts may)", importPath, imp)
 				continue
 			}
 			if strings.HasPrefix(imp, modulePath+"/sdk/internal/") {

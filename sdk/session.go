@@ -72,6 +72,7 @@ type Session struct {
 	// registrations to this session.
 	pluginToolByName map[string]pluginToolBinding
 	pluginSystem     string
+	approveTool      ToolApprovalFunc
 	runCtx           context.Context
 	turnIndex        int
 	shutdownSent     bool
@@ -85,6 +86,7 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 		model:            opt.Model,
 		thinking:         opt.ThinkingLevel,
 		system:           opt.SystemPrompt,
+		approveTool:      opt.ApproveTool,
 		pluginToolByName: map[string]pluginToolBinding{},
 	}
 	var configuredTools []string
@@ -470,7 +472,11 @@ func (s *Session) config() agent.Config {
 			}
 		},
 		BeforeToolCall: func(ctx context.Context, assistant ai.Message, call ai.ContentBlock, args map[string]any) (*agent.BeforeToolCallResult, error) {
-			return s.pluginBeforeToolCall(ctx, assistant, call, args)
+			result, err := s.pluginBeforeToolCall(ctx, assistant, call, args)
+			if err != nil || result != nil && result.Block {
+				return result, err
+			}
+			return s.hostBeforeToolCall(ctx, call, args), nil
 		},
 		AfterToolCall: func(ctx context.Context, assistant ai.Message, call ai.ContentBlock, args map[string]any, result agent.ToolResult, isError bool) (*agent.AfterToolCallResult, error) {
 			return s.pluginAfterToolCall(ctx, assistant, call, args, result, isError)
@@ -481,6 +487,29 @@ func (s *Session) config() agent.Config {
 			return c
 		},
 	}
+}
+
+func (s *Session) hostBeforeToolCall(ctx context.Context, call ai.ContentBlock, args map[string]any) *agent.BeforeToolCallResult {
+	if s.approveTool == nil {
+		return nil
+	}
+	decision, err := s.approveTool(ctx, ToolApprovalRequest{
+		ToolCallID: call.ID,
+		ToolName:   call.Name,
+		Args:       args,
+		CWD:        s.services.CWD,
+	})
+	if err != nil {
+		return &agent.BeforeToolCallResult{Block: true, Reason: err.Error(), Terminate: true}
+	}
+	if decision.Allow {
+		return nil
+	}
+	reason := decision.Reason
+	if reason == "" {
+		reason = "Tool call denied by the host"
+	}
+	return &agent.BeforeToolCallResult{Block: true, Reason: reason}
 }
 
 func (s *Session) Steer(_ context.Context, msg ai.Message) error {

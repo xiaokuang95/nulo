@@ -16,13 +16,17 @@ import (
 // conversations need one Runtime each; Services may be shared and a Runtime is
 // not safe for concurrent use.
 type Runtime struct {
-	Services *AgentSessionServices
-	session  *Session
-	last     SessionStartOptions
+	Services    *AgentSessionServices
+	session     *Session
+	last        SessionStartOptions
+	approveTool ToolApprovalFunc
 }
 
 type RuntimeOptions struct {
 	Services *AgentSessionServices
+	// ApproveTool applies to sessions created or resumed by this runtime
+	// unless SessionStartOptions sets its own.
+	ApproveTool ToolApprovalFunc
 }
 
 func NewRuntime(opt RuntimeOptions) (*Runtime, error) {
@@ -31,7 +35,7 @@ func NewRuntime(opt RuntimeOptions) (*Runtime, error) {
 	}
 	opt.Services.initPluginMaps()
 	opt.Services.ensurePlugins()
-	opt.Services.pluginRuntime = &Runtime{Services: opt.Services}
+	opt.Services.pluginRuntime = &Runtime{Services: opt.Services, approveTool: opt.ApproveTool}
 	return opt.Services.pluginRuntime, nil
 }
 
@@ -63,6 +67,9 @@ type SessionStartOptions struct {
 	SystemPrompt string
 	Tools        []Tool
 	InMemory     bool
+	// ApproveTool is consulted before each tool call. A nil function allows
+	// every call, as the SDK does without a host.
+	ApproveTool ToolApprovalFunc
 
 	startReason         string
 	previousSessionFile string
@@ -325,6 +332,9 @@ func (r *Runtime) beforePluginSession(event string, data map[string]any) error {
 }
 
 func (r *Runtime) replace(mgr *session.Manager, opt SessionStartOptions) (*Session, error) {
+	if opt.ApproveTool == nil {
+		opt.ApproveTool = r.approveTool
+	}
 	old := r.session
 	sess, err := newSession(r.Services, mgr, opt)
 	if err != nil {

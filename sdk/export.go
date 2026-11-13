@@ -16,6 +16,7 @@ type ThinkingLevel = ai.ThinkingLevel
 type Usage = ai.Usage
 type SessionInfo = session.Info
 type SessionTreeNode = session.TreeNode
+type SessionEntry = session.Entry
 type Cost = ai.Cost
 type CostTier = ai.CostTier
 
