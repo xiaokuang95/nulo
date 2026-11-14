@@ -350,6 +350,12 @@ func TestRewindRemovesLastTurn(t *testing.T) {
 	if err := tt.Click("Rewind to checkpoint"); err != nil {
 		t.Fatal(err)
 	}
+	if !a.rewindOpen || !tt.HasText("Rewind to checkpoint") {
+		t.Fatalf("rewind dialog missing: %q", tt.Texts())
+	}
+	if err := tt.Click("Restore checkpoint"); err != nil {
+		t.Fatal(err)
+	}
 	after := len(a.active().Messages)
 	if after >= before {
 		t.Errorf("messages = %d, want fewer than %d", after, before)
@@ -415,6 +421,12 @@ func TestDeleteSessionFromMenu(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := tt.ChooseMenuItem("Delete session"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.deleteOpen {
+		t.Fatal("delete confirmation did not open")
+	}
+	if err := tt.Click("Delete session"); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(a.sessions); got != before-1 {
@@ -615,5 +627,202 @@ func TestProjectNewExpandsGroupAndClearsFilters(t *testing.T) {
 	}
 	if a.collapsedGroups["nulo"] {
 		t.Errorf("target group stayed collapsed")
+	}
+}
+
+func TestDeleteSessionRemovesForkDescendants(t *testing.T) {
+	a := baseApp()
+	a.sessions = []*session{
+		{ID: "root", Title: "root"},
+		{ID: "child", Title: "child", ForkOf: "root"},
+		{ID: "grand", Title: "grand", ForkOf: "child"},
+		{ID: "other", Title: "other"},
+	}
+	a.activeID = "root"
+	if got := a.sessionDescendantCount("root"); got != 2 {
+		t.Fatalf("descendants = %d, want 2", got)
+	}
+	a.deleteSession("root")
+	if len(a.sessions) != 1 || a.sessions[0].ID != "other" {
+		t.Fatalf("sessions after delete = %+v", a.sessions)
+	}
+	if a.activeID != "other" {
+		t.Fatalf("active = %q", a.activeID)
+	}
+}
+
+func TestEscapeStopsRunningSession(t *testing.T) {
+	a, tt := newTester()
+	s := a.active()
+	s.Status = "running"
+	if err := tt.Click("Message nulo"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Key(0, ui.KeyEscape)
+	if s.Status != "paused" {
+		t.Fatalf("status = %q, want paused", s.Status)
+	}
+}
+
+func TestSettingsCapabilitiesWithHost(t *testing.T) {
+	t.Setenv("NULO_CODING_AGENT_SESSION_DIR", t.TempDir())
+	a := newAppWithHost(hostOptions{Workspace: t.TempDir(), AgentDir: t.TempDir(), Trusted: true, Sync: true})
+	defer a.closeHost()
+	a.settingsOpen = true
+	a.settingsTab = 2
+	tt := ui.NewTester(a.view, 1440, 900)
+	tt.Frame()
+	if !tt.HasText("MCP servers") || !tt.HasText("Skill folders") {
+		t.Fatalf("capabilities did not render: %q", tt.Texts())
+	}
+	if err := tt.Click("Add"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.mcpFormOpen || !tt.HasText("Add MCP server") {
+		t.Fatalf("MCP form did not open: %q", tt.Texts())
+	}
+	a.mcpFormOpen = false
+	tt.Frame()
+	if err := tt.Click("New"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.skillFormOpen || !tt.HasText("New skill") {
+		t.Fatalf("skill form did not open: %q", tt.Texts())
+	}
+	a.skillFormOpen = false
+	tt.Frame()
+	if err := tt.Click("Global"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.configOpen || !strings.HasSuffix(a.configPath, "mcp.json") {
+		t.Fatalf("config editor = open:%v path:%q", a.configOpen, a.configPath)
+	}
+}
+
+func TestSettingsProviderFormsWithHost(t *testing.T) {
+	t.Setenv("NULO_CODING_AGENT_SESSION_DIR", t.TempDir())
+	a := newAppWithHost(hostOptions{Workspace: t.TempDir(), AgentDir: t.TempDir(), Trusted: true, Sync: true})
+	defer a.closeHost()
+	a.settingsOpen = true
+	a.settingsTab = 1
+	tt := ui.NewTester(a.view, 1440, 900)
+	tt.Frame()
+	if err := tt.Click("Add provider"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.providerFormOpen || !tt.HasText("Provider ID") {
+		t.Fatalf("provider form did not open: %q", tt.Texts())
+	}
+	a.providerFormOpen = false
+	tt.Frame()
+	if err := tt.Click("Add model"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.modelFormOpen || !tt.HasText("Model ID") {
+		t.Fatalf("model form did not open: %q", tt.Texts())
+	}
+}
+
+func TestVisibleSessionsSearchesMessageContent(t *testing.T) {
+	a := baseApp()
+	first := &session{ID: "a", Title: "Alpha", Status: "done"}
+	second := &session{ID: "b", Title: "Beta", Status: "done", Messages: []message{
+		{Role: "user", Text: "plain"},
+		{Role: "assistant", Blocks: []block{{Type: "tool", Title: "Search", Command: "rg needle", Output: "found in transcript"}}},
+	}}
+	a.sessions = []*session{first, second}
+	a.filter = 0
+	a.search = "transcript"
+	got := a.visibleSessions()
+	if len(got) != 1 || got[0].ID != "b" {
+		t.Fatalf("visible = %+v", got)
+	}
+	a.search = "not-present"
+	if got := a.visibleSessions(); len(got) != 0 {
+		t.Fatalf("unexpected matches = %+v", got)
+	}
+}
+
+func TestModelSearchFiltersPopover(t *testing.T) {
+	a, tt := newTester()
+	if err := tt.Click("Switch model"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Type("llama")
+	if !tt.HasText("Llama 4 Scout") || tt.HasText("Kimi K2 Thinking") {
+		t.Fatalf("filtered models = %q", tt.Texts())
+	}
+	if err := tt.Click("Llama 4 Scout"); err != nil {
+		t.Fatal(err)
+	}
+	if a.active().Model != "local/llama-4-scout" {
+		t.Fatalf("model = %q", a.active().Model)
+	}
+}
+
+func TestDiffLineReviewNote(t *testing.T) {
+	a, tt := newTester()
+	if err := tt.Click("Review note on line 4"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Type("keep this branch")
+	if err := tt.Click("Add note"); err != nil {
+		t.Fatal(err)
+	}
+	files := a.active().Changes.Files
+	found := false
+	for _, file := range files {
+		for _, comment := range file.Comments {
+			if comment.Text == "keep this branch" && comment.Row >= 0 {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("review note missing: %+v", files)
+	}
+}
+
+func TestSlashCommandsOpenDockModelAndSettings(t *testing.T) {
+	a, _ := newTester()
+	a.send("/terminal")
+	if a.dockTab != 2 || !a.dockOpen {
+		t.Fatalf("terminal command: tab=%d open=%v", a.dockTab, a.dockOpen)
+	}
+	a.send("/settings")
+	if !a.settingsOpen {
+		t.Fatal("settings command did not open settings")
+	}
+	a.settingsOpen = false
+	a.send("/model")
+	if !a.showModel || a.modelQuery != "" {
+		t.Fatalf("model command: open=%v query=%q", a.showModel, a.modelQuery)
+	}
+	a.showModel = false
+	a.send("/review")
+	if a.dockTab != 0 || !a.dockOpen {
+		t.Fatalf("review command: tab=%d open=%v", a.dockTab, a.dockOpen)
+	}
+}
+
+func TestRewindDialogShowsFileSnapshot(t *testing.T) {
+	a, tt := newTester()
+	a.rewindOpen = true
+	a.rewindSessionID = a.activeID
+	a.rewindPoints = []rewindPoint{{
+		Label: "Before: test", Detail: "now · 2 entries after", EntryID: "e1",
+		SnapshotKey: "e1", Snapshot: true, SnapshotFiles: 3,
+	}}
+	a.rewindIndex = 0
+	a.rewindRestoreFiles = true
+	tt.Frame()
+	if !tt.HasText("Restore 3 changed file(s) from this checkpoint") {
+		t.Fatalf("snapshot option missing: %q", tt.Texts())
+	}
+	if err := tt.Click("Restore 3 changed file(s) from this checkpoint"); err != nil {
+		t.Fatal(err)
+	}
+	if a.rewindRestoreFiles {
+		t.Fatal("snapshot checkbox did not toggle")
 	}
 }

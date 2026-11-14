@@ -8,6 +8,7 @@ import (
 
 type Event struct {
 	Type                  string                    `json:"type"`
+	Plan                  *Plan                     `json:"plan,omitempty"`
 	Message               *ai.Message               `json:"message,omitempty"`
 	Messages              []ai.Message              `json:"messages,omitempty"`
 	AssistantMessageEvent *ai.AssistantMessageEvent `json:"assistantMessageEvent,omitempty"`
@@ -93,3 +94,17 @@ type TurnUpdate struct {
 }
 
 type EventSink func(Event)
+
+// Plan is the structured task plan a session exposes to its host. Status is
+// one of pending, active, done, or blocked.
+type Plan struct {
+	Title string     `json:"title"`
+	Steps []PlanStep `json:"steps"`
+	Next  string     `json:"next,omitempty"`
+}
+
+type PlanStep struct {
+	Title  string `json:"title"`
+	Detail string `json:"detail,omitempty"`
+	Status string `json:"status"`
+}

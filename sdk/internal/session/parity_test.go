@@ -362,6 +362,19 @@ func TestOpenOrCreate(t *testing.T) {
 	}
 }
 
+func TestOpenOrCreateKeepsIDFromSessionPath(t *testing.T) {
+	dir := t.TempDir()
+	const id = "12345678-1234-4234-8234-123456789abc"
+	path := filepath.Join(dir, "2026-01-01T00-00-00-000Z_"+id+".jsonl")
+	m, err := OpenOrCreate(path, "/tmp/proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ID() != id || m.File() != path {
+		t.Fatalf("session = %q at %q, want %q at %q", m.ID(), m.File(), id, path)
+	}
+}
+
 func TestSessionJSONKeepsHTMLLiteral(t *testing.T) {
 	dir := t.TempDir()
 	m := Create("/tmp/proj", dir)

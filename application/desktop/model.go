@@ -7,11 +7,12 @@ import (
 
 // provider is one model provider shown in Settings and the model menu.
 type provider struct {
-	ID      string
-	Name    string
-	BaseURL string
-	API     string
-	Models  []model
+	ID           string
+	Name         string
+	BaseURL      string
+	API          string
+	APIKeySource string // auth, models, env, or empty
+	Models       []model
 }
 
 type model struct {
@@ -62,6 +63,24 @@ type plan struct {
 	Next  string
 }
 
+type rewindPoint struct {
+	Label         string
+	Detail        string
+	EntryID       string
+	MessageIndex  int
+	SnapshotKey   string
+	Snapshot      bool
+	SnapshotFiles int
+	SnapshotNote  string
+}
+
+type reviewComment struct {
+	Row   int
+	Label string
+	Text  string
+	Time  string
+}
+
 type changeFile struct {
 	Path     string
 	Status   string // M, A, D
@@ -70,6 +89,9 @@ type changeFile struct {
 	Language string
 	Diff     []string
 	Reviewed bool
+	Note     string
+	Staged   bool
+	Comments []reviewComment
 }
 
 type changeSet struct {
@@ -131,38 +153,47 @@ type block struct {
 type message struct {
 	Role        string // user, assistant, notice
 	Time        string
+	RawTime     int64
+	EntryID     string
 	Text        string
 	Attachments []string
 	Blocks      []block
 }
 
 type session struct {
-	ID         string
-	Path       string
-	Project    string
-	CWD        string
-	ParentPath string
-	Title      string
-	Status     string // awaiting, running, done, paused, error, idle
-	Branch     string
-	Env        string
-	Worktree   string
-	Model      string
-	ModelName  string
-	ModelLimit int
-	Thinking   string
-	Approval   string
-	Started    string
-	Updated    string
-	Modified   int64
-	Note       string
-	ForkOf     string
-	Welcome    bool
-	Real       bool
-	Notices    []message
-	Approvals  []block
-	SkillNames []string
-	MCPServers []string
+	ID          string
+	Path        string
+	Project     string
+	CWD         string
+	BaseCWD     string
+	OriginCWD   string
+	TrustRoot   string
+	ParentPath  string
+	Title       string
+	Status      string // awaiting, running, done, paused, error, idle
+	Branch      string
+	Env         string
+	Worktree    string
+	Model       string
+	ModelName   string
+	ModelLimit  int
+	Thinking    string
+	Approval    string
+	Started     string
+	Updated     string
+	Modified    int64
+	Note        string
+	ForkOf      string
+	Welcome     bool
+	Real        bool
+	Notices     []message
+	Approvals   []block
+	SkillNames  []string
+	SkillAll    []skillInfo
+	MCPServers  []string
+	MCPAll      []mcpServerInfo
+	PluginNames []string
+	PluginDiags []string
 
 	Plan     plan
 	Changes  *changeSet

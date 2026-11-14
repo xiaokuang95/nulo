@@ -2,12 +2,17 @@ package sdk
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
+	"github.com/xiaokuang95/nulo/sdk/internal/mcp"
 	"github.com/xiaokuang95/nulo/sdk/internal/session"
+	"github.com/xiaokuang95/nulo/sdk/internal/skills"
 )
 
 // Messages returns the active branch's projected messages, including the
@@ -48,6 +53,23 @@ func (s *Session) SkillNames() []string {
 	out := make([]string, 0, len(s.skills))
 	for _, skill := range s.skills {
 		out = append(out, skill.Name)
+	}
+	return out
+}
+
+// PluginNames returns the native plugins loaded for this session.
+func (s *Session) PluginNames() []string {
+	if s == nil || s.services == nil || s.services.plugins == nil {
+		return nil
+	}
+	instances := s.services.plugins.Instances()
+	out := make([]string, 0, len(instances))
+	for _, instance := range instances {
+		name := instance.Registration.Name
+		if name == "" {
+			name = filepath.Base(instance.Path)
+		}
+		out = append(out, name)
 	}
 	return out
 }
@@ -113,6 +135,99 @@ func ListAllSessions(agentDir string) ([]SessionInfo, error) {
 	return out, nil
 }
 
+// SkillInfo describes one discovered skill without exposing its body.
+type SkillInfo struct {
+	Name                   string `json:"name"`
+	Description            string `json:"description,omitempty"`
+	Path                   string `json:"path,omitempty"`
+	Source                 string `json:"source,omitempty"`
+	DisableModelInvocation bool   `json:"disableModelInvocation,omitempty"`
+}
+
+// ListSkills discovers every skill a session would see, including ones the
+// host disabled for model invocation.
+func ListSkills(agentDir, cwd string, projectTrusted bool) []SkillInfo {
+	var paths []string
+	if manager := NewSettingsManager(cwd, agentDir); manager != nil {
+		paths = manager.GetSkillPaths()
+	}
+	loaded := skills.LoadSkills(skills.LoadOptions{
+		Cwd:             cwd,
+		AgentDir:        agentDir,
+		ProjectTrusted:  projectTrusted,
+		IncludeDefaults: true,
+		SkillPaths:      paths,
+	})
+	out := make([]SkillInfo, 0, len(loaded.Skills))
+	for _, skill := range loaded.Skills {
+		out = append(out, SkillInfo{
+			Name: skill.Name, Description: skill.Description, Path: skill.FilePath,
+			Source: skill.Source, DisableModelInvocation: skill.DisableModelInvocation,
+		})
+	}
+	return out
+}
+
+// MCPServerInfo describes one configured MCP server without exposing its
+// command, environment, or headers.
+type MCPServerInfo struct {
+	Name        string `json:"name"`
+	Enabled     bool   `json:"enabled"`
+	Description string `json:"description,omitempty"`
+}
+
+// ListMCPServers lists the merged global and project mcp.json entries,
+// including disabled servers, so a host can show an enable switch.
+func ListMCPServers(agentDir, cwd string, projectTrusted bool) []MCPServerInfo {
+	cfg := mcp.Load(agentDir, cwd, projectTrusted)
+	names := make([]string, 0, len(cfg.Servers))
+	for name := range cfg.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]MCPServerInfo, 0, len(names))
+	for _, name := range names {
+		server := cfg.Servers[name]
+		enabled := server.Enabled == nil || *server.Enabled
+		out = append(out, MCPServerInfo{Name: name, Enabled: enabled, Description: server.Description})
+	}
+	return out
+}
+
+// TestProviderModel sends a tiny prompt through the configured provider to
+// verify that its key, endpoint, and first model work together. It does not
+// save a session and waits at most 20 seconds.
+func TestProviderModel(agentDir, modelSpec string) error {
+	providers, err := ai.LoadProviders(agentDir)
+	if err != nil {
+		return err
+	}
+	model, err := providers.FindModel(modelSpec)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	stream := ai.StreamForDir(agentDir)(ctx, model, ai.Transcript{
+		Messages: []ai.Message{ai.UserMessage("Reply with the single word OK.", time.Now().UnixMilli())},
+	}, ai.StreamOptions{MaxTokens: 32})
+	result := stream.Result()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if result.StopReason == ai.StopError {
+		message := strings.TrimSpace(result.ErrorMessage)
+		if message == "" {
+			message = "provider returned an error"
+		}
+		if len(message) > 300 {
+			message = message[:300] + "…"
+		}
+		return errors.New(message)
+	}
+	return nil
+}
+
 // ProviderModels is one provider and the models it serves, as read from
 // models.json. The provider entry is resolved into ready-to-use Model values,
 // so a host can show names, context windows and limits without parsing the
@@ -123,6 +238,10 @@ type ProviderModels struct {
 	API     string  `json:"api"`
 	BaseURL string  `json:"baseUrl"`
 	Models  []Model `json:"models"`
+	// APIKeySource is "auth" for auth.json, "models" for a models.json
+	// template, "env" for the provider's environment variable, or empty.
+	// It reports where a key would come from without exposing the key.
+	APIKeySource string `json:"apiKeySource,omitempty"`
 }
 
 // ListProviders resolves every provider in <agentDir>/models.json. Models
@@ -136,10 +255,11 @@ func ListProviders(agentDir string) ([]ProviderModels, error) {
 	out := make([]ProviderModels, 0, len(providers))
 	for providerID, config := range providers {
 		entry := ProviderModels{
-			ID:      providerID,
-			Name:    config.Name,
-			API:     config.API,
-			BaseURL: config.BaseURL,
+			ID:           providerID,
+			Name:         config.Name,
+			API:          config.API,
+			BaseURL:      config.BaseURL,
+			APIKeySource: ai.APIKeySource(agentDir, providerID, config.APIKey),
 		}
 		if entry.Name == "" {
 			entry.Name = providerID
@@ -194,3 +314,16 @@ type ToolApprovalDecision struct {
 // person answers; the agent turn waits in the meantime. Returning an error
 // aborts the turn.
 type ToolApprovalFunc func(ctx context.Context, request ToolApprovalRequest) (ToolApprovalDecision, error)
+
+// SetProviderAPIKey stores an API key for provider in the agent's auth.json.
+// The next request picks it up without restarting the runtime. The file is
+// rewritten atomically with owner-only permissions.
+func SetProviderAPIKey(agentDir, provider, key string) error {
+	return ai.SaveAPIKey(agentDir, provider, key)
+}
+
+// ClearProviderAPIKey removes a stored auth.json credential. It does not
+// remove a models.json apiKey or environment fallback.
+func ClearProviderAPIKey(agentDir, provider string) error {
+	return ai.RemoveAPIKey(agentDir, provider)
+}

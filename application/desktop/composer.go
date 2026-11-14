@@ -17,31 +17,24 @@ type slashCommand struct {
 var slashCommands = []slashCommand{
 	{"/plan", "Open the plan for this session", "⇧⌘P"},
 	{"/diff", "Review the working-tree changes", "⇧⌘D"},
+	{"/review", "Alias for /diff", "⇧⌘D"},
+	{"/terminal", "Open the terminal dock", ""},
+	{"/model", "Switch model or thinking level", ""},
+	{"/settings", "Open settings", "⌘,"},
 	{"/context", "Inspect context usage and loaded files", ""},
 	{"/compact", "Drop stale tool results from context", ""},
 	{"/approve", "Approve the pending command", ""},
 	{"/clear", "Start a clean thread", ""},
 }
 
-var mentionFiles = []string{
-	"application/desktop/main.go",
-	"application/desktop/app.go",
-	"application/desktop/thread.go",
-	"application/desktop/dock.go",
-	"application/desktop/composer.go",
-	"ui/design/desktop/index.html",
-	"ui/design/desktop/app.css",
-	"ui/design/desktop/app.js",
-	"sdk/session.go",
-	"sdk/session_test.go",
-	"README.md",
-	"AGENTS.md",
-}
-
 func (a *app) composer(c *ui.Context, s *session) {
 	p := a.pal()
 	approval := s.pendingApproval()
-	dock := ui.Column(c).Shrink(0).FillWidth().Padding(0, 24, 13, 24).Background(p.bg)
+	bottom := float32(13)
+	if a.compactDensity {
+		bottom = 8
+	}
+	dock := ui.Column(c).Shrink(0).FillWidth().Padding(0, 24, bottom, 24).Background(p.bg)
 	dock.Children(func() {
 		wrap := ui.Column(c).WidthPercent(100).MaxWidth(820).AlignSelf(ui.Center)
 		wrap.Children(func() {
@@ -65,12 +58,32 @@ func (a *app) composerBox(c *ui.Context, s *session) {
 		a.addAttachments(paths)
 	}
 	box.Children(func() {
+		editing := a.editingMessage(s)
+		if editing {
+			ui.Row(c).FillWidth().Height(30).Padding(0, 12).Gap(7).AlignItems(ui.Center).
+				Background(p.accentSoft).BorderWidth(0, 0, 1, 0).BorderColor(p.accent.Alpha(0.18)).Children(func() {
+				a.icon(c, "edit", 12, p.accent)
+				ui.Text(c, "Editing message · Enter to resend").Font("monospace").FontSize(10).TextColor(p.accent2).Grow(1)
+				if a.smallButton(c, "Cancel").Clicked() {
+					a.cancelMessageEdit(true)
+				}
+			})
+		}
 		if len(a.attachments) > 0 {
 			a.attachmentTray(c)
 		}
-		in := ui.TextAreaBase(c, &a.draft).Placeholder("Ask nulo to build, debug, or explain…").
+		placeholder := "Ask nulo to build, debug, or explain…"
+		if editing {
+			placeholder = "Edit message…"
+		}
+		minHeight := float32(54)
+		if a.compactDensity {
+			minHeight = 44
+		}
+		in := ui.TextAreaBase(c, &a.draft).Placeholder(placeholder).
 			Label("Message nulo").FontSize(14).LineHeight(1.6).TextColor(p.text).
-			Padding(13, 15, 6, 15).MinHeight(54).MaxHeight(184).Lines(1, 8)
+			Padding(13, 15, 6, 15).MinHeight(minHeight).MaxHeight(184).Lines(1, 8).
+			OnPaste(func(text string) bool { return a.pasteClipboardImage(c, text) })
 		if a.focusComposer {
 			in.AutoFocus()
 			a.focusComposer = false
@@ -80,6 +93,10 @@ func (a *app) composerBox(c *ui.Context, s *session) {
 			if k.Key == ui.KeyEscape {
 				if a.slashOpen || a.mentionOpen {
 					a.slashOpen, a.mentionOpen = false, false
+					return true
+				}
+				if a.editingMessage(s) {
+					a.cancelMessageEdit(true)
 					return true
 				}
 				return false
@@ -114,7 +131,7 @@ func (a *app) composerBox(c *ui.Context, s *session) {
 				}
 			}
 			if a.mentionOpen {
-				items := a.filteredMentions()
+				items := a.currentMentions()
 				switch k.Key {
 				case ui.KeyUp:
 					if len(items) > 0 {
@@ -164,7 +181,11 @@ func (a *app) composerBox(c *ui.Context, s *session) {
 				ui.Popover(c, perm, &a.showPerm, func() { a.permissionPopover(c, s) })
 			}
 
-			env := a.chip(c, "git-branch", "Local · "+s.Branch, a.showEnv)
+			envLabel := "Local · " + s.Branch
+			if s.Env == "Worktree" && s.Worktree != "" {
+				envLabel = "Worktree · " + s.Worktree
+			}
+			env := a.chip(c, "git-branch", envLabel, a.showEnv)
 			if env.Clicked() {
 				a.showEnv = !a.showEnv
 				a.showPerm, a.showModel = false, false
@@ -200,7 +221,7 @@ func (a *app) composerBox(c *ui.Context, s *session) {
 		}
 	}
 	if a.mentionOpen {
-		items := a.filteredMentions()
+		items := a.currentMentions()
 		if len(items) > 0 {
 			ui.Popover(c, box, &a.mentionOpen, func() { a.mentionMenu(c, items) })
 		}
@@ -247,10 +268,16 @@ func (a *app) attachmentTray(c *ui.Context) {
 	tray.Children(func() {
 		for i, path := range items {
 			idx := i
-			chip := ui.Row(c).Height(25).Padding(0, 7).Gap(5).Radius(5).
+			height := float32(25)
+			if isImagePath(path) {
+				height = 40
+			}
+			chip := ui.Row(c).Height(height).Padding(0, 7).Gap(5).Radius(5).
 				Border(1, p.line).Background(p.surface2).AlignItems(ui.Center)
 			chip.Children(func() {
-				a.icon(c, "file", 11, p.text4)
+				if !a.imageThumbButton(c, path, 34) {
+					a.icon(c, "file", 11, p.text4)
+				}
 				ui.Text(c, filepath.Base(path)).Font("monospace").FontSize(10).
 					TextColor(p.text3).SingleLine()
 				button := ui.ButtonBase(c).Size(17, 17).Radius(4).Label("Remove " + filepath.Base(path))
@@ -325,16 +352,44 @@ func (a *app) filteredSlash() []slashCommand {
 	return out
 }
 
-func (a *app) filteredMentions() []string {
-	q, _ := a.mentionQuery()
-	q = strings.ToLower(q)
-	var out []string
-	for _, f := range mentionFiles {
-		if q == "" || strings.Contains(strings.ToLower(f), q) {
-			out = append(out, f)
-		}
+var defaultMentionFiles = []string{
+	"application/desktop/main.go",
+	"application/desktop/app.go",
+	"application/desktop/thread.go",
+	"application/desktop/dock.go",
+	"application/desktop/composer.go",
+	"ui/design/desktop/index.html",
+	"ui/design/desktop/app.css",
+	"ui/design/desktop/app.js",
+	"sdk/session.go",
+	"sdk/session_test.go",
+	"README.md",
+	"AGENTS.md",
+}
+
+func (a *app) currentMentions() []string {
+	s := a.active()
+	if s == nil {
+		return nil
 	}
-	return out
+	if s.CWD == "" {
+		q, _ := a.mentionQuery()
+		q = strings.ToLower(strings.TrimSpace(q))
+		var out []string
+		for _, file := range defaultMentionFiles {
+			if q == "" || strings.Contains(strings.ToLower(file), q) {
+				out = append(out, file)
+			}
+		}
+		return out
+	}
+	return a.filteredMentions(s.CWD)
+}
+
+func (a *app) invalidateFileIndex(cwd string) {
+	if cwd != "" {
+		delete(a.fileIndices, filepath.Clean(cwd))
+	}
 }
 
 func (a *app) runSlash(name string) {
@@ -471,12 +526,16 @@ func (a *app) modelChip(c *ui.Context, s *session) ui.Element {
 
 func (a *app) sendButton(c *ui.Context, s *session) {
 	p := a.pal()
+	editing := a.editingMessage(s)
 	empty := strings.TrimSpace(a.draft) == ""
-	running := s.Status == "running" && empty
+	running := s.Status == "running" && empty && !editing
 	bg := p.accent
 	color := p.accentInk
 	iconName := "arrow-up"
 	label := "Send message"
+	if editing {
+		label = "Save & resend"
+	}
 	if empty {
 		bg, color = p.surface3, p.text4
 	}
@@ -584,13 +643,21 @@ func (a *app) environmentPopover(c *ui.Context, s *session) {
 		head.Children(func() {
 			ui.Text(c, "ENVIRONMENT").Font("monospace").FontSize(9).TextColor(p.text4).LetterSpacing(0.7)
 		})
-		localDesc := s.CWD + " · current working tree"
-		if s.CWD == "" {
+		localCWD := s.CWD
+		if s.Env == "Worktree" && s.BaseCWD != "" {
+			localCWD = s.BaseCWD
+		}
+		localDesc := localCWD + " · current working tree"
+		if localCWD == "" {
 			localDesc = "current working tree"
+		}
+		worktreeDesc := "Create an isolated git worktree for this session"
+		if s.Worktree != "" {
+			worktreeDesc = s.Worktree + " · " + s.Branch
 		}
 		for _, o := range []struct{ id, title, desc string }{
 			{"Local", "Local", localDesc},
-			{"Worktree", "Worktree", "Not connected to the SDK yet"},
+			{"Worktree", "Worktree", worktreeDesc},
 		} {
 			opt := o
 			row := ui.ButtonBase(c).FillWidth().Height(44).Padding(7, 8).Gap(8).Radius(6).
@@ -601,16 +668,16 @@ func (a *app) environmentPopover(c *ui.Context, s *session) {
 				row.Background(p.surface2)
 			}
 			if row.Clicked() {
-				if opt.id == "Worktree" {
-					a.showEnv = false
-					a.pendingToast = "Worktree sessions are not wired up yet"
-					continue
-				}
-				s.Env = opt.id
 				a.showEnv = false
+				a.switchEnvironment(s, opt.id)
+				continue
 			}
 			row.Children(func() {
-				a.icon(c, "folder", 14, chooser(s.Env == opt.id, p.accent, p.text4))
+				iconName := "folder"
+				if opt.id == "Worktree" {
+					iconName = "git-branch"
+				}
+				a.icon(c, iconName, 14, chooser(s.Env == opt.id, p.accent, p.text4))
 				ui.Column(c).Grow(1).Gap(1).Children(func() {
 					ui.Text(c, opt.title).FontSize(12).TextColor(p.text2)
 					ui.Text(c, opt.desc).FontSize(11).TextColor(p.text4).SingleLine()
@@ -619,6 +686,37 @@ func (a *app) environmentPopover(c *ui.Context, s *session) {
 					a.icon(c, "check", 12, p.accent)
 				}
 			})
+		}
+		if s.Env == "Worktree" && a.host != nil {
+			record, ok := a.host.worktreeFor(s.ID)
+			if ok {
+				ui.Box(c).Height(1).FillWidth().Background(p.line).Margin(5, 0)
+				if mergeInProgress(record.Root) {
+					if a.smallButton(c, "Resolve merge conflicts").Clicked() {
+						a.showEnv = false
+						a.openMergeConflicts(s, record.Root, record.Branch)
+					}
+				}
+				ui.Row(c).FillWidth().Gap(5).Children(func() {
+					if a.smallButton(c, "Merge into Local").Clicked() {
+						a.showEnv = false
+						a.confirmDestructive("Merge worktree?", "Merge "+record.Branch+" into the local branch. The local working tree must be clean.", "Merge", func() {
+							if err := a.host.mergeWorktree(a, s); err != nil {
+								a.pendingToast = "Merge: " + err.Error()
+							}
+						})
+					}
+					if a.smallButton(c, "Remove worktree").Clicked() {
+						a.showEnv = false
+						a.confirmDestructive("Remove worktree?", "Switch this session back to Local, delete "+record.Path+" and the branch "+record.Branch+". Uncommitted worktree changes are discarded.", "Remove worktree", func() {
+							if err := a.host.removeWorktree(a, s); err != nil {
+								a.pendingToast = "Worktree: " + err.Error()
+							}
+						})
+					}
+				})
+				ui.Text(c, record.Path).Font("monospace").FontSize(9).TextColor(p.text4).SingleLine()
+			}
 		}
 	})
 }
@@ -632,47 +730,75 @@ func (a *app) modelPopover(c *ui.Context, s *session) {
 			ui.Text(c, "MODEL").Font("monospace").FontSize(9).TextColor(p.text4).LetterSpacing(0.7).Grow(1)
 			ui.Text(c, formatTokens(s.Context.Limit)+" context").Font("monospace").FontSize(9).TextColor(p.text4)
 		})
-		for _, prov := range a.providers {
-			ui.Row(c).Height(20).Padding(0, 8).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, strings.ToUpper(prov.Name)).Font("monospace").FontSize(9).TextColor(p.text4).LetterSpacing(0.5)
-			})
-			provider := prov
-			for _, m := range provider.Models {
-				mdl := m
-				id := provider.ID + "/" + mdl.ID
-				row := ui.ButtonBase(c).FillWidth().Height(38).Padding(6, 8).Gap(8).Radius(5).
-					Justify(ui.Start).Label(mdl.Name)
-				if s.Model == id {
-					row.Background(p.accentSoft)
-				} else if row.Hovered() {
-					row.Background(p.surface2)
-				}
-				if row.Clicked() {
-					a.setSessionModel(s, id)
-					a.showModel = false
-					a.pendingToast = "Model: " + mdl.Name
-				}
-				row.Children(func() {
-					a.icon(c, "sparkles", 13, chooser(s.Model == id, p.accent2, p.text4))
-					ui.Column(c).Grow(1).Gap(1).Children(func() {
-						ui.Text(c, mdl.Name).FontSize(12).TextColor(p.text2)
-						ui.Textf(c, "%s · %s out", formatTokens(mdl.Context), formatTokens(mdl.MaxOut)).
-							Font("monospace").FontSize(10).TextColor(p.text4)
-					})
-					if s.Model == id {
-						a.icon(c, "check", 12, p.accent)
+		searchRow := ui.Row(c).FillWidth().Height(34).Padding(0, 8, 0, 8).Gap(7).AlignItems(ui.Center)
+		searchRow.Children(func() {
+			a.icon(c, "search", 12, p.text4)
+			ui.TextInputBase(c, &a.modelQuery).FillWidth().Height(26).Padding(0, 8).Radius(5).
+				Border(1, p.line).Background(p.surface2).FontSize(11).TextColor(p.text).
+				Placeholder("Search models…").Label("Search models").AutoFocus()
+		})
+		query := strings.ToLower(strings.TrimSpace(a.modelQuery))
+		shown := 0
+		list := ui.Scroll(c).FillWidth().MaxHeight(360)
+		list.Children(func() {
+			for _, prov := range a.providers {
+				provider := prov
+				matches := make([]model, 0, len(provider.Models))
+				for _, mdl := range provider.Models {
+					if query == "" || strings.Contains(strings.ToLower(mdl.Name+" "+mdl.ID+" "+provider.Name+" "+provider.ID), query) {
+						matches = append(matches, mdl)
 					}
+				}
+				if len(matches) == 0 {
+					continue
+				}
+				shown += len(matches)
+				ui.Row(c).Height(20).Padding(0, 8).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, strings.ToUpper(provider.Name)).Font("monospace").FontSize(9).TextColor(p.text4).LetterSpacing(0.5)
+				})
+				for _, m := range matches {
+					mdl := m
+					id := provider.ID + "/" + mdl.ID
+					row := ui.ButtonBase(c).FillWidth().Height(38).Padding(6, 8).Gap(8).Radius(5).
+						Justify(ui.Start).Label(mdl.Name)
+					if s.Model == id {
+						row.Background(p.accentSoft)
+					} else if row.Hovered() {
+						row.Background(p.surface2)
+					}
+					if row.Clicked() {
+						a.setSessionModel(s, id)
+						a.showModel = false
+						a.pendingToast = "Model: " + mdl.Name
+					}
+					row.Children(func() {
+						a.icon(c, "sparkles", 13, chooser(s.Model == id, p.accent2, p.text4))
+						ui.Column(c).Grow(1).Gap(1).Children(func() {
+							ui.Text(c, mdl.Name).FontSize(12).TextColor(p.text2)
+							ui.Textf(c, "%s · %s out", formatTokens(mdl.Context), formatTokens(mdl.MaxOut)).
+								Font("monospace").FontSize(10).TextColor(p.text4)
+						})
+						if s.Model == id {
+							a.icon(c, "check", 12, p.accent)
+						}
+					})
+				}
+			}
+			if shown == 0 {
+				ui.Column(c).FillWidth().Padding(18, 8).Gap(2).Children(func() {
+					ui.Text(c, "No models match").FontSize(12).TextColor(p.text3)
+					ui.Text(c, "Try a provider or model name.").FontSize(10).TextColor(p.text4)
 				})
 			}
-		}
+		})
 		ui.Box(c).Height(1).FillWidth().Background(p.line).Margin(4, 0)
 		ui.Row(c).Height(26).Padding(0, 8).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, "THINKING").Font("monospace").FontSize(9).TextColor(p.text4).LetterSpacing(0.7).Grow(1)
 		})
-		ui.Row(c).Padding(0, 6, 4, 6).Gap(4).Children(func() {
-			for _, level := range []string{"low", "medium", "high"} {
+		ui.Row(c).Padding(0, 6, 4, 6).Gap(4).Wrap().Children(func() {
+			for _, level := range a.thinkingLevelOptions(s) {
 				l := level
-				b := ui.ButtonBase(c).Height(26).Padding(0, 10).Radius(5).Grow(1).Label(l).
+				b := ui.ButtonBase(c).Height(26).Padding(0, 9).Radius(5).Label(l).
 					Background(p.surface2).Border(1, p.line)
 				if s.Thinking == l {
 					b.Background(p.accentSoft).BorderColor(p.accent.Alpha(0.3))

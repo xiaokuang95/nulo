@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // envAPIKeyVars maps the providers Pi knows to the environment variable that
@@ -67,6 +68,35 @@ func LookupAPIKey(model Model, agentDir string, opts StreamOptions) (string, err
 		return resolveConfigValueE(model.APIKey, `API key for provider "`+model.Provider+`"`, opts.Env)
 	}
 	return keyFromEnv(model.Provider), nil
+}
+
+// APIKeySource reports where a provider's credential currently comes from
+// without exposing it: "auth" for auth.json, "models" for the models.json
+// template, "env" for the provider's environment variable, or "".
+func APIKeySource(agentDir, provider, apiKeyTemplate string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return ""
+	}
+	if credential, ok := credentialFromFile(provider, agentDir); ok {
+		switch credential.Type {
+		case "", "api_key":
+			if credential.Key != "" {
+				return "auth"
+			}
+		case "oauth":
+			if credential.Access != "" || credential.Refresh != "" {
+				return "auth"
+			}
+		}
+	}
+	if strings.TrimSpace(apiKeyTemplate) != "" {
+		return "models"
+	}
+	if keyFromEnv(provider) != "" {
+		return "env"
+	}
+	return ""
 }
 
 func keyFromEnv(provider string) string {

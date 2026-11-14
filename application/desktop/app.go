@@ -27,6 +27,11 @@ type app struct {
 
 	paper bool
 
+	showTimestamps   bool
+	collapseThinking bool
+	compactDensity   bool
+	notifyDone       bool
+
 	sidebarOpen   bool
 	sidebarDrawer bool
 	dockOpen      bool
@@ -44,6 +49,7 @@ type app struct {
 	showPerm      bool
 	showEnv       bool
 	showModel     bool
+	modelQuery    string
 	slashOpen     bool
 	mentionOpen   bool
 	lastDraft     string
@@ -56,19 +62,144 @@ type app struct {
 	threadScroll    ui.ScrollState
 	scrollToEnd     bool
 	selectedFile    map[string]int
+	commentFile     string
+	commentRow      int
+	commentLabel    string
+	commentText     string
+	commentKey      string
 	collapsedPlan   map[string]bool
 	collapsedGroups map[string]bool
+	terminals       map[string]*desktopTerminal
+	terminalErrs    map[string]string
+	fileIndices     map[string]workspaceFileIndex
+	imagePreviews   map[string]cachedImagePreview
+	providerTests   map[string]string
+	terminalTabs    map[string]string
+	terminalSeq     int64
+	focusTerminalID string
+	shuttingDown    bool
 
-	paletteOpen  bool
-	paletteQuery string
-	paletteIndex int
-	settingsOpen bool
-	settingsTab  int
-	commitOpen   bool
-	commitMsg    string
-	renameOpen   bool
-	renameID     string
-	renameValue  string
+	paletteOpen             bool
+	paletteQuery            string
+	paletteIndex            int
+	settingsOpen            bool
+	settingsTab             int
+	commitOpen              bool
+	commitMsg               string
+	renameOpen              bool
+	renameID                string
+	renameValue             string
+	rewindOpen              bool
+	rewindSessionID         string
+	rewindPoints            []rewindPoint
+	rewindIndex             int
+	rewindRestoreFiles      bool
+	messageEditID           string
+	messageEditIndex        int
+	messageEditSessionID    string
+	deleteOpen              bool
+	deleteID                string
+	confirmOpen             bool
+	confirmTitle            string
+	confirmDetail           string
+	confirmLabel            string
+	confirmAction           func()
+	imageOpen               bool
+	imagePath               string
+	cropMode                bool
+	cropDragging            bool
+	cropStartX              float32
+	cropStartY              float32
+	cropEndX                float32
+	cropEndY                float32
+	imageRotation           int
+	imageFlipX              bool
+	imageFlipY              bool
+	imageEditBitmap         *ui.Bitmap
+	imageAnnotate           bool
+	imageAnnotDrawing       bool
+	imageStrokes            []imageStroke
+	imageAnnotVersion       int
+	imageAnnotCachedVer     int
+	imageAnnotBitmap        *ui.Bitmap
+	imageAnnotW             int
+	imageAnnotH             int
+	configOpen              bool
+	configTitle             string
+	configPath              string
+	configText              string
+	configHelp              string
+	configAfter             func() error
+	keyOpen                 bool
+	keyProvider             string
+	keyName                 string
+	keyValue                string
+	mcpFormOpen             bool
+	mcpFormAdd              bool
+	mcpFormTarget           string
+	mcpFormName             string
+	mcpFormOriginal         string
+	mcpFormDescription      string
+	mcpFormCommand          string
+	mcpFormArgs             string
+	mcpFormURL              string
+	mcpFormEnv              string
+	mcpFormHeaders          string
+	mcpFormEnabled          bool
+	mcpFormError            string
+	mcpFormAdvanced         string
+	mcpFormSessionID        string
+	skillFormOpen           bool
+	skillFormTarget         string
+	skillFormName           string
+	skillFormDescription    string
+	skillFormBody           string
+	skillFormEdit           bool
+	skillFormPath           string
+	skillFormError          string
+	skillFormSessionID      string
+	providerFormOpen        bool
+	providerFormAdd         bool
+	providerFormID          string
+	providerFormName        string
+	providerFormBaseURL     string
+	providerFormAPI         string
+	providerFormAPIKey      string
+	providerFormError       string
+	providerFormAdvanced    string
+	providerFormSessionID   string
+	modelFormOpen           bool
+	modelFormAdd            bool
+	modelFormProvider       string
+	modelFormID             string
+	modelFormName           string
+	modelFormContext        string
+	modelFormMaxOut         string
+	modelFormReasoning      bool
+	modelFormImage          bool
+	modelFormError          string
+	modelFormAdvanced       string
+	modelFormSessionID      string
+	mergeConflictOpen       bool
+	mergeConflictSessionID  string
+	mergeConflictRoot       string
+	mergeConflictBranch     string
+	mergeConflictFiles      []string
+	mergeEditorOpen         bool
+	mergeEditorPath         string
+	mergeEditorTab          int
+	mergeEditorBase         string
+	mergeEditorOurs         string
+	mergeEditorTheirs       string
+	mergeEditorResult       string
+	mergeEditorWorking      string
+	mergeEditorOursExists   bool
+	mergeEditorTheirsExists bool
+	mergeEditorBaseExists   bool
+	mergeEditorBinary       bool
+	mergeEditorChosen       bool
+	mergeEditorDelete       bool
+	mergeEditorError        string
 
 	lastWidth     float32
 	dockDragStart float32
@@ -93,14 +224,22 @@ func newAppWithHost(opts hostOptions) *app {
 
 func baseApp() *app {
 	return &app{
-		providers:       append([]provider(nil), providers...),
-		sidebarOpen:     true,
-		dockOpen:        true,
-		dockWidth:       420,
-		selectedFile:    make(map[string]int),
-		collapsedPlan:   make(map[string]bool),
-		collapsedGroups: make(map[string]bool),
-		scrollToEnd:     true,
+		providers:        append([]provider(nil), providers...),
+		showTimestamps:   true,
+		collapseThinking: true,
+		notifyDone:       true,
+		commentRow:       -1,
+		sidebarOpen:      true,
+		dockOpen:         true,
+		dockWidth:        420,
+		selectedFile:     make(map[string]int),
+		collapsedPlan:    make(map[string]bool),
+		collapsedGroups:  make(map[string]bool),
+		terminals:        make(map[string]*desktopTerminal),
+		terminalTabs:     make(map[string]string),
+		fileIndices:      make(map[string]workspaceFileIndex),
+		providerTests:    make(map[string]string),
+		scrollToEnd:      true,
 	}
 }
 
@@ -150,6 +289,12 @@ func (a *app) selectSession(id string) {
 	a.sidebarDrawer = false
 	a.dockTab = 0
 	a.showPerm, a.showEnv, a.showModel = false, false, false
+	if a.messageEditID != "" {
+		a.cancelMessageEdit(true)
+	}
+	if a.commentRow >= 0 {
+		a.cancelLineComment()
+	}
 }
 
 func (a *app) fitDockWidth(w float32) {
@@ -191,6 +336,9 @@ func (a *app) toggleDock() {
 func (a *app) openDock(tab int) {
 	a.dockTab = tab
 	a.dockOpen = true
+	if tab == 2 && a.active() != nil {
+		a.focusTerminalID = a.active().ID
+	}
 	if a.lastWidth > 0 && a.lastWidth < 1180 {
 		a.dockDrawer = true
 		a.sidebarDrawer = false
@@ -252,6 +400,7 @@ func (a *app) newSessionFor(g projectGroup) {
 	a.draft = ""
 	a.attachments = nil
 	a.slashOpen, a.mentionOpen = false, false
+	a.cancelMessageEdit(false)
 	a.sidebarDrawer = false
 	delete(a.collapsedGroups, g.Key)
 	a.openDock(3)
@@ -266,6 +415,7 @@ func (a *app) activatePrepared(s *session, g projectGroup) {
 	a.draft = ""
 	a.attachments = nil
 	a.slashOpen, a.mentionOpen = false, false
+	a.cancelMessageEdit(false)
 	a.sidebarDrawer = false
 	delete(a.collapsedGroups, g.Key)
 	a.openDock(3)
@@ -324,24 +474,43 @@ func (a *app) nextID(prefix string) string {
 	}
 }
 
+func (a *app) beginDelete(s *session) {
+	if s == nil || len(a.sessions) <= 1 {
+		return
+	}
+	a.deleteID = s.ID
+	a.deleteOpen = true
+}
+
 func (a *app) deleteSession(id string) {
 	if len(a.sessions) <= 1 {
 		return
 	}
-	activeRemoved := a.activeID == id
-	if a.host != nil {
-		if s := a.sessionByID(id); s != nil && s.ForkOf != "" {
-			activeRemoved = activeRemoved || a.activeID == s.ID
+	remove := map[string]bool{id: true}
+	for changed := true; changed; {
+		changed = false
+		for _, s := range a.sessions {
+			if s.ForkOf != "" && remove[s.ForkOf] && !remove[s.ID] {
+				remove[s.ID] = true
+				changed = true
+			}
 		}
 	}
+	activeRemoved := false
 	out := a.sessions[:0]
 	for _, s := range a.sessions {
-		if s.ID != id && s.ForkOf != id {
+		if !remove[s.ID] {
 			out = append(out, s)
 			continue
 		}
 		activeRemoved = activeRemoved || a.activeID == s.ID
+		a.closeTerminal(s.ID)
+		delete(a.terminalTabs, s.ID)
+		delete(a.selectedFile, s.ID)
 		if a.host != nil {
+			if s.Status == "running" || s.Status == "awaiting" {
+				a.host.abort(s)
+			}
 			if err := a.host.deleteSession(a, s); err != nil {
 				a.pendingToast = "Delete: " + err.Error()
 			}
@@ -372,23 +541,39 @@ func (a *app) send(raw string) {
 	if text == "" {
 		return
 	}
+	if a.editingMessage(s) {
+		a.submitMessageEdit(s, text)
+		return
+	}
 	cmd := ""
 	if strings.HasPrefix(text, "/") {
 		cmd = strings.Fields(text)[0]
 	}
 	attachments := append([]string(nil), a.attachments...)
-	a.draft = ""
-	a.attachments = nil
 	a.showPerm, a.showEnv, a.showModel = false, false, false
+	if cmd != "" {
+		a.draft = ""
+		a.attachments = nil
+	}
 	switch cmd {
 	case "/plan":
 		a.openDock(1)
 		return
-	case "/diff":
+	case "/diff", "/review":
 		a.openDock(0)
 		return
 	case "/context":
 		a.openDock(3)
+		return
+	case "/terminal":
+		a.openDock(2)
+		return
+	case "/model":
+		a.showModel = true
+		a.modelQuery = ""
+		return
+	case "/settings":
+		a.settingsOpen = true
 		return
 	case "/compact":
 		a.compact()
@@ -411,10 +596,14 @@ func (a *app) send(raw string) {
 	if a.host != nil && s.Real {
 		if err := a.host.send(a, s, text, attachments); err != nil {
 			a.pendingToast = "Send failed: " + err.Error()
-			s.Status = "error"
+			return
 		}
+		a.draft = ""
+		a.attachments = nil
 		return
 	}
+	a.draft = ""
+	a.attachments = nil
 
 	if s.Welcome {
 		s.Welcome = false
@@ -470,27 +659,110 @@ func (a *app) rewindSession(s *session) {
 	if s == nil {
 		return
 	}
+	var points []rewindPoint
 	if a.host != nil && s.Real {
-		if err := a.host.rewind(a, s); err != nil {
+		e, err := a.host.ensureEngine(a, s)
+		if err != nil || e == nil {
+			if err != nil {
+				a.pendingToast = "Rewind: " + err.Error()
+			}
+			return
+		}
+		branch := e.sess.Branch()
+		for i := len(branch) - 1; i >= 0; i-- {
+			entry := branch[i]
+			if entry.Type != "message" || entry.Message == nil || entry.Message.Role != "user" {
+				continue
+			}
+			text := strings.TrimSpace(entry.Message.ContentString())
+			if text == "" {
+				text = "user message"
+			}
+			target := ""
+			if entry.ParentID != nil {
+				target = *entry.ParentID
+			}
+			snapshotKey, files, note, hasSnapshot := findCheckpointSnapshot(a.host.agentDir, s.ID, branch, target)
+			points = append(points, rewindPoint{
+				Label:         "Before: " + titleSnippet(text),
+				Detail:        fmt.Sprintf("%s · %d entries after", messageTime(entry.Message.Timestamp), len(branch)-1-i),
+				EntryID:       target,
+				SnapshotKey:   snapshotKey,
+				Snapshot:      hasSnapshot,
+				SnapshotFiles: files,
+				SnapshotNote:  note,
+			})
+		}
+	} else {
+		for i, m := range s.Messages {
+			if m.Role != "user" {
+				continue
+			}
+			points = append([]rewindPoint{{
+				Label:        "Before: " + titleSnippet(m.Text),
+				Detail:       fmt.Sprintf("%s · %d messages after", m.Time, len(s.Messages)-i),
+				MessageIndex: i,
+			}}, points...)
+		}
+	}
+	if len(points) == 0 {
+		a.pendingToast = "No checkpoints yet · send a message first"
+		return
+	}
+	a.rewindSessionID = s.ID
+	a.rewindPoints = points
+	a.rewindIndex = 0
+	a.rewindRestoreFiles = points[0].Snapshot
+	a.rewindOpen = true
+}
+
+func titleSnippet(text string) string {
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+	if len(text) > 72 {
+		text = text[:69] + "…"
+	}
+	return text
+}
+
+func (a *app) confirmRewind() {
+	if !a.rewindOpen || len(a.rewindPoints) == 0 {
+		return
+	}
+	var s *session
+	for _, candidate := range a.sessions {
+		if candidate.ID == a.rewindSessionID {
+			s = candidate
+			break
+		}
+	}
+	if s == nil {
+		a.rewindOpen = false
+		return
+	}
+	if a.rewindIndex < 0 || a.rewindIndex >= len(a.rewindPoints) {
+		return
+	}
+	point := a.rewindPoints[a.rewindIndex]
+	a.rewindOpen = false
+	if a.host != nil && s.Real {
+		restoreFiles := a.rewindRestoreFiles && point.Snapshot
+		if err := a.host.rewindTo(a, s, point.EntryID, point.Label, restoreFiles, point.SnapshotKey); err != nil {
 			a.pendingToast = "Rewind: " + err.Error()
 			return
 		}
 		a.scrollToEnd = true
-		a.pendingToast = "Rewound to the last checkpoint"
+		a.pendingToast = "Rewound to checkpoint"
 		return
 	}
-	for i := len(s.Messages) - 1; i >= 0; i-- {
-		if s.Messages[i].Role == "user" {
-			removed := len(s.Messages) - i
-			s.Messages = s.Messages[:i]
-			s.Status = "idle"
-			s.Plan.Next = "Rewound to the checkpoint before your last message."
-			a.pendingToast = fmt.Sprintf("Rewound %d message(s)", removed)
-			a.scrollToEnd = true
-			return
-		}
+	if point.MessageIndex < 0 || point.MessageIndex > len(s.Messages) {
+		return
 	}
-	a.pendingToast = "Nothing to rewind in this session"
+	removed := len(s.Messages) - point.MessageIndex
+	s.Messages = s.Messages[:point.MessageIndex]
+	s.Status = "idle"
+	s.Plan.Next = "Rewound to the checkpoint before your last message."
+	a.pendingToast = fmt.Sprintf("Rewound %d message(s)", removed)
+	a.scrollToEnd = true
 }
 
 func (a *app) beginRename(s *session) {
@@ -639,6 +911,12 @@ func (a *app) setTheme(paper bool) {
 		}
 		_ = a.win.SetBackgroundColor(bg)
 	}
+	theme := a.terminalTheme()
+	for _, terminal := range a.terminals {
+		if terminal.term != nil {
+			terminal.term.SetTheme(theme, theme)
+		}
+	}
 }
 
 func (a *app) visibleSessions() []*session {
@@ -649,7 +927,7 @@ func (a *app) visibleSessions() []*session {
 			continue
 		}
 		if q != "" {
-			hay := strings.ToLower(s.Title + " " + s.Project + " " + s.Branch + " " + s.Note)
+			hay := strings.ToLower(a.sessionSearchText(s))
 			if !strings.Contains(hay, q) {
 				continue
 			}
@@ -657,6 +935,35 @@ func (a *app) visibleSessions() []*session {
 		out = append(out, s)
 	}
 	return out
+}
+
+func (a *app) sessionSearchText(s *session) string {
+	if s == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(s.Title)
+	b.WriteByte(' ')
+	b.WriteString(s.Project)
+	b.WriteByte(' ')
+	b.WriteString(s.Branch)
+	b.WriteByte(' ')
+	b.WriteString(s.Note)
+	for _, m := range s.Messages {
+		b.WriteByte(' ')
+		b.WriteString(m.Text)
+		for _, block := range m.Blocks {
+			b.WriteByte(' ')
+			b.WriteString(block.Text)
+			b.WriteByte(' ')
+			b.WriteString(block.Title)
+			b.WriteByte(' ')
+			b.WriteString(block.Output)
+			b.WriteByte(' ')
+			b.WriteString(block.Command)
+		}
+	}
+	return b.String()
 }
 
 func (a *app) matchesFilter(s *session) bool {
@@ -729,14 +1036,6 @@ func (a *app) cycleApproval() {
 	}
 	s.Approval = next
 	a.pendingToast = "Permission · " + approvalLabel(next)
-}
-
-func (a *app) stopOrClose() {
-	if a.paletteOpen || a.settingsOpen || a.commitOpen || a.renameOpen ||
-		a.showPerm || a.showEnv || a.showModel || a.slashOpen || a.mentionOpen {
-		return
-	}
-	a.stopSession(a.active())
 }
 
 func (a *app) openPalette() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -153,5 +154,40 @@ func TestRuntimeApprovalAppliesToNewSessions(t *testing.T) {
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("runtime approval did not block the tool: %v", err)
+	}
+}
+
+func TestProviderAPIKeyStoredInAuthJSON(t *testing.T) {
+	agentDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"local":{"name":"Local","api":"openai-completions","baseUrl":"https://example.test/v1","models":[{"id":"m"}]}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	providers, err := ListProviders(agentDir)
+	if err != nil || len(providers) != 1 {
+		t.Fatalf("providers = %+v, %v", providers, err)
+	}
+	if providers[0].APIKeySource != "" {
+		t.Fatalf("source before key = %q", providers[0].APIKeySource)
+	}
+	if err := SetProviderAPIKey(agentDir, "local", "sk-test"); err != nil {
+		t.Fatal(err)
+	}
+	providers, err = ListProviders(agentDir)
+	if err != nil || providers[0].APIKeySource != "auth" {
+		t.Fatalf("source after key = %q, %v", providers[0].APIKeySource, err)
+	}
+	info, err := os.Stat(filepath.Join(agentDir, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("auth.json mode = %o", info.Mode().Perm())
+	}
+	if err := ClearProviderAPIKey(agentDir, "local"); err != nil {
+		t.Fatal(err)
+	}
+	providers, err = ListProviders(agentDir)
+	if err != nil || providers[0].APIKeySource != "" {
+		t.Fatalf("source after clear = %q, %v", providers[0].APIKeySource, err)
 	}
 }

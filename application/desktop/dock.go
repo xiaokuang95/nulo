@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -28,19 +30,24 @@ func (a *app) dock(c *ui.Context, s *session, width float32) {
 			a.dockDragStart = 0
 		}
 		a.dockHeader(c, s, width)
-		body := ui.Scroll(c).Grow(1).MinHeight(0).Padding(12)
-		body.Children(func() {
-			switch a.dockTab {
-			case 0:
-				a.dockChanges(c, s)
-			case 1:
-				a.dockPlan(c, s)
-			case 2:
-				a.dockTerminal(c, s)
-			case 3:
-				a.dockContext(c, s)
-			}
-		})
+		if a.dockTab == 2 && a.host != nil && s.Real {
+			body := ui.Column(c).Grow(1).MinHeight(0).Padding(12)
+			body.Children(func() { a.dockTerminal(c, s) })
+		} else {
+			body := ui.Scroll(c).Grow(1).MinHeight(0).Padding(12)
+			body.Children(func() {
+				switch a.dockTab {
+				case 0:
+					a.dockChanges(c, s)
+				case 1:
+					a.dockPlan(c, s)
+				case 2:
+					a.dockTerminal(c, s)
+				case 3:
+					a.dockContext(c, s)
+				}
+			})
+		}
 	})
 }
 
@@ -90,6 +97,9 @@ func (a *app) dockHeader(c *ui.Context, s *session, width float32) {
 			}
 			if b.Clicked() {
 				a.dockTab = i
+				if i == 2 && a.active() != nil {
+					a.focusTerminalID = a.active().ID
+				}
 			}
 			b.Children(func() {
 				color := p.text4
@@ -180,12 +190,13 @@ func (a *app) dockChanges(c *ui.Context, s *session) {
 					ui.Text(c, "·").Font("monospace").FontSize(10).TextColor(p.text4)
 					ui.Textf(c, "%d/%d reviewed", reviewed, total).Font("monospace").FontSize(10).TextColor(p.text4)
 					ui.Spacer(c)
-					if s.Changes.Staged {
+					if stagedFileCount(s) > 0 {
 						if a.primaryButton(c, "Commit…", "").Clicked() {
 							a.commitMsg = ""
 							a.commitOpen = true
 						}
-					} else {
+					}
+					if !s.Changes.Staged {
 						if a.smallButton(c, "Stage all").Clicked() {
 							if a.host != nil && s.Real {
 								a.stageAll(s)
@@ -225,6 +236,9 @@ func (a *app) dockChanges(c *ui.Context, s *session) {
 				}
 				if row.Clicked() {
 					a.selectedFile[s.ID] = fi
+					if a.commentFile != "" {
+						a.cancelLineComment()
+					}
 				}
 				row.Children(func() {
 					if a.checkbox(c, f.Reviewed, "Mark "+f.Path+" reviewed").Clicked() {
@@ -245,6 +259,10 @@ func (a *app) dockChanges(c *ui.Context, s *session) {
 					})
 					ui.Text(c, f.Path).Font("monospace").FontSize(11).TextColor(chooser(active, p.text2, p.text3)).
 						Grow(1).SingleLine()
+					if len(f.Comments) > 0 {
+						a.icon(c, "message", 9, p.info)
+						ui.Textf(c, "%d", len(f.Comments)).Font("monospace").FontSize(9).TextColor(p.info)
+					}
 					ui.Textf(c, "+%d", f.Add).Font("monospace").FontSize(9).TextColor(p.accent2)
 					ui.Textf(c, "−%d", f.Del).Font("monospace").FontSize(9).TextColor(p.bad)
 				})
@@ -292,6 +310,27 @@ func (a *app) diffCard(c *ui.Context, s *session, f *changeFile, idx, total int)
 			ui.Text(c, f.Path).Font("monospace").FontSize(10).TextColor(p.text3).Grow(1).SingleLine()
 			ui.Text(c, strings.ToUpper(f.Language)).Font("monospace").FontSize(9).TextColor(p.text4)
 			ui.Text(c, "‹ ›").Font("monospace").FontSize(10).TextColor(p.text4)
+			a.iconButton(c, "external", "Open "+f.Path, false, func() {
+				path := filepath.Join(s.CWD, filepath.FromSlash(f.Path))
+				if err := mygo.Shell.OpenPath(path); err != nil {
+					a.pendingToast = "Open: " + err.Error()
+				}
+			})
+			stageIcon := "plus"
+			stageLabel := "Stage " + f.Path
+			if f.Staged {
+				stageIcon = "check"
+				stageLabel = "Unstage " + f.Path
+			}
+			a.iconButton(c, stageIcon, stageLabel, false, func() {
+				a.toggleStageChangeFile(s, *f)
+			})
+			a.iconButton(c, "refresh", "Revert "+f.Path, false, func() {
+				file := *f
+				a.confirmDestructive("Revert this file?", "All working-tree changes to "+file.Path+" are discarded. This cannot be undone.", "Revert file", func() {
+					a.revertChangeFile(s, file)
+				})
+			})
 			a.iconButton(c, "copy", "Copy patch", false, func() {
 				c.Services().WriteClipboard(strings.Join(f.Diff, "\n"))
 				a.pendingToast = "Copied patch"
@@ -300,22 +339,36 @@ func (a *app) diffCard(c *ui.Context, s *session, f *changeFile, idx, total int)
 		diff := ui.Column(c).FillWidth().Background(p.codeBg)
 		diff.Children(func() {
 			oldLine, newLine := 0, 0
+			hunk := -1
+			rowIndex := -1
 			for _, line := range f.Diff {
 				if strings.HasPrefix(line, "@@") {
+					hunk++
 					fmt.Sscanf(line, "@@ -%d", &oldLine)
 					if i := strings.Index(line, " +"); i >= 0 {
 						fmt.Sscanf(line[i+2:], "%d", &newLine)
 					}
-					row := ui.Row(c).FillWidth().Height(22).Padding(0, 9).AlignItems(ui.Center).
+					row := ui.Row(c).FillWidth().Height(22).Padding(0, 9).Gap(7).AlignItems(ui.Center).
 						Background(p.surface2)
+					hunkIndex := hunk
 					row.Children(func() {
-						ui.Text(c, line).Font("monospace").FontSize(9).TextColor(p.text4).SingleLine()
+						ui.Text(c, line).Font("monospace").FontSize(9).TextColor(p.text4).Grow(1).SingleLine()
+						if f.Status == "M" {
+							if a.smallButton(c, "Revert hunk").Clicked() {
+								file := *f
+								index := hunkIndex
+								a.confirmDestructive("Revert this hunk?", "Only this hunk is discarded from the working tree. The rest of the file stays.", "Revert hunk", func() {
+									a.revertChangeHunk(s, file, index)
+								})
+							}
+						}
 					})
 					continue
 				}
 				if oldLine == 0 && newLine == 0 {
 					oldLine, newLine = 1, 1
 				}
+				rowIndex++
 				display := newLine
 				kind := "ctx"
 				if strings.HasPrefix(line, "+") {
@@ -323,19 +376,29 @@ func (a *app) diffCard(c *ui.Context, s *session, f *changeFile, idx, total int)
 					newLine++
 				} else if strings.HasPrefix(line, "-") {
 					kind = "del"
-					display = 0
+					display = oldLine
 					oldLine++
 				} else {
 					oldLine++
 					newLine++
 				}
-				a.diffRow(c, line, display, kind)
+				a.diffRow(c, s, f, line, display, kind, rowIndex)
+				a.diffRowComments(c, s, f, rowIndex, fmt.Sprintf("%d", display))
 			}
+		})
+		footer := ui.Row(c).FillWidth().Height(38).Padding(0, 8).Gap(6).AlignItems(ui.Center).
+			BorderWidth(1, 0, 0, 0).BorderColor(p.line)
+		footer.Children(func() {
+			note := ui.TextInputBase(c, &f.Note).Height(26).Grow(1).Padding(0, 7).Radius(5).
+				Border(1, p.line).Background(p.surface2).FontSize(11).TextColor(p.text3).
+				Placeholder("Review note…").Label("Review note for " + f.Path)
+			note.SingleLine()
+
 		})
 	})
 }
 
-func (a *app) diffRow(c *ui.Context, line string, number int, kind string) {
+func (a *app) diffRow(c *ui.Context, s *session, f *changeFile, line string, number int, kind string, rowIndex int) {
 	p := a.pal()
 	bg := ui.Transparent
 	textColor := p.text3
@@ -349,7 +412,7 @@ func (a *app) diffRow(c *ui.Context, line string, number int, kind string) {
 		textColor = p.text3
 		mark = "−"
 	}
-	row := ui.Row(c).FillWidth().Height(19).Padding(0, 0).AlignItems(ui.Center).Background(bg)
+	row := ui.Row(c).FillWidth().Height(20).Padding(0, 0).AlignItems(ui.Center).Background(bg)
 	label := ""
 	if number > 0 {
 		label = fmt.Sprintf("%d", number)
@@ -367,9 +430,73 @@ func (a *app) diffRow(c *ui.Context, line string, number int, kind string) {
 		} else if kind == "del" {
 			barColor = p.bad
 		}
-		ui.Box(c).Width(2).Height(19).Background(barColor)
+		ui.Box(c).Width(2).Height(20).Background(barColor)
 		ui.Text(c, mark+" "+body).Font("monospace").
-			FontSize(10.5).TextColor(textColor).Padding(0, 5).SingleLine()
+			FontSize(10.5).TextColor(textColor).Padding(0, 5).Grow(1).SingleLine()
+		btn := ui.ButtonBase(c).Size(16, 16).Radius(4).Label("Review note on line " + label).
+			Tooltip("Add a review note")
+		if btn.Hovered() {
+			btn.Background(p.surface3)
+		}
+		if btn.Clicked() {
+			a.beginLineComment(s, *f, rowIndex, label)
+		}
+		btn.Children(func() {
+			a.icon(c, "message", 10, chooser(len(commentsForRow(*f, rowIndex)) > 0, p.info, p.text4))
+		})
+	})
+}
+
+func (a *app) diffRowComments(c *ui.Context, s *session, f *changeFile, row int, label string) {
+	p := a.pal()
+	for i, comment := range f.Comments {
+		if comment.Row != row {
+			continue
+		}
+		index := i
+		rowEl := ui.Row(c).FillWidth().Padding(4, 8).Gap(7).AlignItems(ui.Start).
+			Margin(0, 8, 4, 42).Background(p.info.Alpha(0.06)).
+			BorderWidth(0, 0, 0, 2).BorderColor(p.info)
+		rowEl.Children(func() {
+			a.icon(c, "message", 10, p.info)
+			ui.Column(c).Grow(1).Gap(1).Children(func() {
+				ui.Textf(c, "line %s · %s", comment.Label, comment.Time).
+					Font("monospace").FontSize(9).TextColor(p.text4)
+				ui.Text(c, comment.Text).FontSize(11).LineHeight(1.4).TextColor(p.text3)
+			})
+			btn := ui.ButtonBase(c).Size(16, 16).Radius(4).Label("Delete review note")
+			if btn.Hovered() {
+				btn.Background(p.surface3)
+			}
+			if btn.Clicked() {
+				a.deleteLineComment(s, *f, index)
+			}
+			btn.Children(func() { a.icon(c, "x", 9, p.text4) })
+		})
+	}
+	if !a.commentDraftFor(s, *f) || a.commentRow != row {
+		return
+	}
+	composer := ui.Column(c).FillWidth().Padding(6, 8).Gap(6).
+		Margin(0, 8, 6, 42).Radius(5).Border(1, p.lineStrong).Background(p.surface2)
+	composer.Children(func() {
+		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+			a.icon(c, "message", 10, p.info)
+			ui.Textf(c, "Line %s", label).Font("monospace").FontSize(9).TextColor(p.text4)
+		})
+		input := ui.TextInputBase(c, &a.commentText).FillWidth().Height(28).Padding(0, 7).Radius(4).
+			Border(1, p.line).Background(p.bg).FontSize(11).TextColor(p.text).
+			Placeholder("Leave a review note…").Label("Review note").AutoFocus()
+		input.SingleLine()
+		ui.Row(c).FillWidth().Gap(6).Children(func() {
+			ui.Spacer(c)
+			if a.smallButton(c, "Cancel").Clicked() {
+				a.cancelLineComment()
+			}
+			if a.primaryButton(c, "Add note", "check").Clicked() {
+				a.saveLineComment(s, *f)
+			}
+		})
 	})
 }
 
@@ -383,7 +510,7 @@ func (a *app) dockPlan(c *ui.Context, s *session) {
 			ui.Text(c, "No plan yet").FontSize(13).FontWeight(550).TextColor(p.text2)
 			text := "Send a request and the agent will lay out its steps here."
 			if a.host != nil && s.Real {
-				text = "The SDK session has no structured plan. Tool activity appears in the thread and terminal."
+				text = "The agent updates this panel through the SDK plan tool as work progresses."
 			}
 			ui.Text(c, text).FontSize(11).TextColor(p.text4).TextAlign(ui.Center)
 		})
@@ -429,40 +556,6 @@ func (a *app) dockPlan(c *ui.Context, s *session) {
 				ui.Text(c, s.Plan.Next).FontSize(12).TextColor(p.text3).Grow(1)
 			})
 		}
-	})
-}
-
-func (a *app) dockTerminal(c *ui.Context, s *session) {
-	p := a.pal()
-	ui.Column(c).FillWidth().Gap(10).Children(func() {
-		toolbar := ui.Row(c).FillWidth().Height(30).AlignItems(ui.Center).Gap(7)
-		toolbar.Children(func() {
-			a.icon(c, "terminal", 13, p.accent2)
-			location := "pty · ~/Downloads/nulo"
-			if s.CWD != "" {
-				location = "shell · " + s.CWD
-			}
-			ui.Text(c, location).Font("monospace").FontSize(10).TextColor(p.text4).Grow(1).SingleLine()
-			if a.smallButton(c, "Clear").Clicked() {
-				s.Terminal = nil
-			}
-		})
-		term := ui.Column(c).FillWidth().Clip().Radius(8).Border(1, p.line).
-			Background(p.codeBg).Padding(12, 12, 13, 12).Gap(3)
-		term.Children(func() {
-			if len(s.Terminal) == 0 {
-				ui.Text(c, "No output in this session.").Font("monospace").FontSize(11).TextColor(p.text4)
-			}
-			for _, line := range s.Terminal {
-				a.termLine(c, line)
-			}
-		})
-		ui.Row(c).FillWidth().Height(32).Padding(0, 9).Gap(7).Radius(7).Border(1, p.line).
-			Background(p.surface.Alpha(0.5)).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "❯").Font("monospace").FontSize(12).TextColor(p.accent)
-			ui.Text(c, "Run a command in this session…").Font("monospace").FontSize(11).TextColor(p.text4).Grow(1)
-			ui.Text(c, "host pty").Font("monospace").FontSize(9).TextColor(p.text4)
-		})
 	})
 }
 

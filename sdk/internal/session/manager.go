@@ -221,7 +221,35 @@ func OpenOrCreate(path, cwd string) (*Manager, error) {
 	m = newManager(cwd, filepath.Dir(abs), true, "")
 	m.file = abs
 	m.flushed = false
+	if id := sessionIDFromPath(abs); id != "" {
+		m.sessionID = id
+		m.header.ID = id
+	}
 	return m, nil
+}
+
+// sessionIDFromPath recovers the ID from the timestamp_ID.jsonl name the
+// session manager writes, so recreating a missing session file keeps the
+// caller's session identity instead of inventing a new one.
+func sessionIDFromPath(path string) string {
+	base := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	i := strings.LastIndexByte(base, '_')
+	if i < 0 || i == len(base)-1 {
+		return ""
+	}
+	id := base[i+1:]
+	if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
+		return ""
+	}
+	for n, r := range id {
+		if n == 8 || n == 13 || n == 18 || n == 23 {
+			continue
+		}
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return ""
+		}
+	}
+	return id
 }
 
 func newManager(cwd, sessionDir string, persist bool, parent string) *Manager {

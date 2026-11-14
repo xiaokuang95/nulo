@@ -9,6 +9,8 @@ import (
 type Message = ai.Message
 type Model = ai.Model
 type Event = agent.Event
+type Plan = agent.Plan
+type PlanStep = agent.PlanStep
 type ContentBlock = ai.ContentBlock
 type Tool = agent.AgentTool
 type StopReason = ai.StopReason

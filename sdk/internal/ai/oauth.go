@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -107,18 +108,79 @@ func refreshRadiusToken(model Model, credential storedCredential) (storedCredent
 func saveCredential(agentDir, provider string, credential storedCredential) error {
 	authFileMu.Lock()
 	defer authFileMu.Unlock()
-	path := filepath.Join(agentDir, "auth.json")
-	root := map[string]json.RawMessage{}
-	if body, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(body, &root); err != nil {
-			return err
-		}
+	root, err := readAuthRoot(agentDir)
+	if err != nil {
+		return err
 	}
 	encoded, err := json.Marshal(credential)
 	if err != nil {
 		return err
 	}
 	root[provider] = encoded
+	return writeAuthRoot(agentDir, root)
+}
+
+// SaveAPIKey stores an API key for a provider in auth.json with owner-only
+// permissions. It overrides a models.json key or environment variable.
+func SaveAPIKey(agentDir, provider, key string) error {
+	agentDir = strings.TrimSpace(agentDir)
+	provider = strings.TrimSpace(provider)
+	key = strings.TrimSpace(key)
+	if agentDir == "" {
+		return errors.New("agent directory is required")
+	}
+	if provider == "" {
+		return errors.New("provider is required")
+	}
+	if key == "" {
+		return errors.New("API key is empty")
+	}
+	return saveCredential(agentDir, provider, storedCredential{Type: "api_key", Key: key})
+}
+
+// RemoveAPIKey removes this provider's stored credential from auth.json. It
+// leaves other providers and any models.json fallback untouched.
+func RemoveAPIKey(agentDir, provider string) error {
+	agentDir = strings.TrimSpace(agentDir)
+	provider = strings.TrimSpace(provider)
+	if agentDir == "" {
+		return errors.New("agent directory is required")
+	}
+	if provider == "" {
+		return errors.New("provider is required")
+	}
+	authFileMu.Lock()
+	defer authFileMu.Unlock()
+	root, err := readAuthRoot(agentDir)
+	if err != nil {
+		return err
+	}
+	if _, ok := root[provider]; !ok {
+		return nil
+	}
+	delete(root, provider)
+	return writeAuthRoot(agentDir, root)
+}
+
+func readAuthRoot(agentDir string) (map[string]json.RawMessage, error) {
+	root := map[string]json.RawMessage{}
+	body, err := os.ReadFile(filepath.Join(agentDir, "auth.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return root, nil
+		}
+		return nil, err
+	}
+	if err := json.Unmarshal(body, &root); err != nil {
+		return nil, err
+	}
+	return root, nil
+}
+
+func writeAuthRoot(agentDir string, root map[string]json.RawMessage) error {
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		return err
+	}
 	body, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return err
@@ -141,5 +203,19 @@ func saveCredential(agentDir, provider string, credential storedCredential) erro
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	path := filepath.Join(agentDir, "auth.json")
+	if err := os.Rename(name, path); err != nil {
+		if runtime.GOOS != "windows" {
+			return err
+		}
+		// Windows cannot replace an existing file with Rename.
+		if removeErr := os.Remove(path); removeErr == nil || os.IsNotExist(removeErr) {
+			if retryErr := os.Rename(name, path); retryErr != nil {
+				return retryErr
+			}
+			return nil
+		}
+		return err
+	}
+	return nil
 }

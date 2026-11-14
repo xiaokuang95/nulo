@@ -37,6 +37,7 @@ func (a *app) handleSDKEvent(s *session, e *sessionEngine, ev sdk.Event) {
 			a.renderSDKMessages(s, e.sess, nil)
 			a.appendTerminalResult(s, *ev.Message)
 			if ev.Message.ToolName == "edit" || ev.Message.ToolName == "write" || ev.Message.ToolName == "bash" || ev.Message.ToolName == "powershell" {
+				a.invalidateFileIndex(s.CWD)
 				a.requestChanges(s)
 			}
 		case "user":
@@ -50,6 +51,9 @@ func (a *app) handleSDKEvent(s *session, e *sessionEngine, ev sdk.Event) {
 		status := "done"
 		if ev.IsError {
 			status = "fail"
+			if ev.ToolName == "plan" {
+				a.pendingToast = "Plan update failed"
+			}
 		}
 		a.updateToolBlock(s, ev.ToolCallID, status, "", ev.IsError)
 		a.scrollToEnd = true
@@ -71,6 +75,10 @@ func (a *app) handleSDKEvent(s *session, e *sessionEngine, ev sdk.Event) {
 		s.Note = messageNote(s.Updated, countRealMessages(e.sess.Messages()))
 		a.scrollToEnd = true
 		a.requestChanges(s)
+	case "plan_update":
+		if ev.Plan != nil {
+			a.applySDKPlan(s, *ev.Plan)
+		}
 	case "compaction_start":
 		s.Status = "running"
 	case "compaction_end":
@@ -98,6 +106,7 @@ func (a *app) handleSDKEvent(s *session, e *sessionEngine, ev sdk.Event) {
 		s.Notices = append(s.Notices, message{Role: "notice", Time: "now", Text: "Request failed · " + text})
 		a.renderSDKMessages(s, e.sess, nil)
 		a.scrollToEnd = true
+		a.notifyCompletion(s)
 	}
 }
 
@@ -116,8 +125,15 @@ func (a *app) syncSessionMeta(s *session, sess *sdk.Session) {
 	a.applyModelFields(s)
 	s.SkillNames = sess.SkillNames()
 	s.MCPServers = sess.MCPServerNames()
+	s.PluginNames = sess.PluginNames()
+	s.PluginDiags = nil
+	for _, diag := range sess.PluginDiagnostics() {
+		s.PluginDiags = append(s.PluginDiags, diag.Error())
+	}
 	s.Context.Skills = len(s.SkillNames)
 	s.Context.MCP = len(s.MCPServers)
+	s.Context.Plugins = len(s.PluginNames)
+	applyMCPHealth(s)
 }
 
 func (a *app) renderSDKMessages(s *session, sess *sdk.Session, partial *sdk.Message) {
@@ -148,9 +164,9 @@ func (a *app) renderSDKMessages(s *session, sess *sdk.Session, partial *sdk.Mess
 				firstUser = text
 			}
 			hasConversation = true
-			out = append(out, message{Role: "user", Time: messageTime(m.Timestamp), Text: text})
+			out = append(out, message{Role: "user", Time: messageTime(m.Timestamp), RawTime: m.Timestamp, Text: text})
 		case "assistant":
-			um := message{Role: "assistant", Time: messageTime(m.Timestamp)}
+			um := message{Role: "assistant", Time: messageTime(m.Timestamp), RawTime: m.Timestamp}
 			hasConversation = true
 			var toolIDs []string
 			for _, cb := range m.ContentBlocks() {
@@ -166,6 +182,9 @@ func (a *app) renderSDKMessages(s *session, sess *sdk.Session, partial *sdk.Mess
 					}
 					um.Blocks = append(um.Blocks, block{Type: "text", Text: cb.Text})
 				case "toolCall":
+					if cb.Name == "plan" {
+						continue
+					}
 					b := block{
 						Type: "tool", Tool: cb.Name, CallID: cb.ID, Status: "running",
 						Title: toolTitle(cb.Name, cb.Arguments), Meta: toolMeta(cb.Name, cb.Arguments),
@@ -230,6 +249,7 @@ func (a *app) renderSDKMessages(s *session, sess *sdk.Session, partial *sdk.Mess
 	for _, notice := range s.Notices {
 		out = append(out, notice)
 	}
+	assignMessageEntryIDs(sess, out)
 	s.Welcome = !hasConversation
 	if firstUser != "" && (s.Title == "" || s.Title == "Untitled session" || strings.HasPrefix(s.Title, "Untitled")) {
 		s.Title = titleFor(firstUser)
@@ -243,6 +263,34 @@ func (a *app) renderSDKMessages(s *session, sess *sdk.Session, partial *sdk.Mess
 		}
 	}
 	s.Messages = out
+}
+
+func assignMessageEntryIDs(sess *sdk.Session, messages []message) {
+	if sess == nil {
+		return
+	}
+	type key struct {
+		role string
+		ts   int64
+	}
+	ids := map[key]string{}
+	for _, entry := range sess.Branch() {
+		if entry.Type != "message" || entry.Message == nil {
+			continue
+		}
+		role := entry.Message.Role
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		ids[key{role: role, ts: entry.Message.Timestamp}] = entry.ID
+	}
+	for i := range messages {
+		m := &messages[i]
+		if m.RawTime == 0 || (m.Role != "user" && m.Role != "assistant") {
+			continue
+		}
+		m.EntryID = ids[key{role: m.Role, ts: m.RawTime}]
+	}
 }
 
 func clipText(text string, limit int) string {
@@ -496,4 +544,23 @@ func estimateTokens(text string) int {
 	}
 	runes := len([]rune(text))
 	return max(1, runes/4)
+}
+
+func (a *app) applySDKPlan(s *session, p sdk.Plan) {
+	if s == nil {
+		return
+	}
+	next := plan{Title: p.Title, Next: p.Next}
+	for _, step := range p.Steps {
+		status := step.Status
+		switch status {
+		case "pending", "active", "done", "blocked":
+		default:
+			status = "pending"
+		}
+		next.Steps = append(next.Steps, planStep{
+			Title: step.Title, Detail: step.Detail, Status: status,
+		})
+	}
+	s.Plan = next
 }

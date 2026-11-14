@@ -26,19 +26,23 @@ type hostOptions struct {
 }
 
 type desktopHost struct {
-	mu             sync.Mutex
-	app            *app
-	agentDir       string
-	initialCWD     string
-	trusted        bool
-	sync           bool
-	closed         bool
-	services       map[string]*sdk.AgentSessionServices
-	engines        map[string]*sessionEngine
-	pending        map[string]*pendingApproval
-	changesPending map[string]bool
-	defaultMdl     string
-	thinking       string
+	mu              sync.Mutex
+	app             *app
+	agentDir        string
+	initialCWD      string
+	trusted         bool
+	sync            bool
+	closed          bool
+	services        map[string]*sdk.AgentSessionServices
+	engines         map[string]*sessionEngine
+	pending         map[string]*pendingApproval
+	changesPending  map[string]bool
+	worktrees       map[string]worktreeRecord
+	trustedProjects map[string]bool
+	disabledSkills  map[string]bool
+	defaultMdl      string
+	thinking        string
+	defaultApproval string
 }
 
 type sessionEngine struct {
@@ -65,13 +69,17 @@ func newDesktopHost(opts hostOptions) *desktopHost {
 		}
 	}
 	return &desktopHost{
-		agentDir:   opts.AgentDir,
-		initialCWD: opts.Workspace,
-		trusted:    opts.Trusted,
-		sync:       opts.Sync,
-		services:   make(map[string]*sdk.AgentSessionServices),
-		engines:    make(map[string]*sessionEngine),
-		pending:    make(map[string]*pendingApproval),
+		agentDir:        opts.AgentDir,
+		initialCWD:      opts.Workspace,
+		trusted:         opts.Trusted,
+		sync:            opts.Sync,
+		services:        make(map[string]*sdk.AgentSessionServices),
+		engines:         make(map[string]*sessionEngine),
+		pending:         make(map[string]*pendingApproval),
+		worktrees:       make(map[string]worktreeRecord),
+		trustedProjects: make(map[string]bool),
+		disabledSkills:  make(map[string]bool),
+		defaultApproval: "auto-edits",
 	}
 }
 
@@ -179,8 +187,14 @@ func gitBranch(cwd string) string {
 
 func (h *desktopHost) bootstrap(a *app) error {
 	a.hostErr = ""
+	if err := h.loadPreferences(a); err != nil {
+		a.pendingToast = "Desktop settings: " + err.Error()
+	}
 	if err := h.loadProviderCatalog(a); err != nil {
 		a.pendingToast = "Models: " + err.Error()
+	}
+	if err := h.loadWorktrees(); err != nil {
+		a.pendingToast = "Worktrees: " + err.Error()
 	}
 
 	settings := sdk.NewSettingsManager(h.initialCWD, h.agentDir)
@@ -208,11 +222,35 @@ func (h *desktopHost) bootstrap(a *app) error {
 		return err
 	}
 	paths := make(map[string]*session, len(infos))
+	staleWorktrees := false
 	for _, info := range infos {
 		if info.CWD == "" {
 			continue
 		}
-		g := h.ensureProject(a, info.CWD, false)
+		baseCWD, cwd := info.CWD, info.CWD
+		env, worktreeName, branch := "Local", "", gitBranch(info.CWD)
+		if record, ok := h.worktreeFor(info.ID); ok {
+			if record.Root != "" {
+				baseCWD = record.Root
+			}
+			cwd = baseCWD
+			branch = gitBranch(baseCWD)
+			if record.Active {
+				if st, err := os.Stat(record.Path); err == nil && st.IsDir() {
+					cwd = record.Path
+					env = "Worktree"
+					worktreeName = filepath.Base(record.Path)
+					if record.Branch != "" {
+						branch = record.Branch
+					}
+				} else {
+					record.Active = false
+					h.worktrees[info.ID] = record
+					staleWorktrees = true
+				}
+			}
+		}
+		g := h.ensureProject(a, baseCWD, false)
 		name := strings.TrimSpace(info.Name)
 		if name == "" {
 			name = titleFor(info.FirstMessage)
@@ -222,9 +260,9 @@ func (h *desktopHost) bootstrap(a *app) error {
 		}
 		updated := relativeTime(info.Modified)
 		s := &session{
-			ID: info.ID, Path: info.Path, Project: g.Key, CWD: info.CWD,
-			Title: name, Status: "done", Branch: gitBranch(info.CWD), Env: "Local",
-			Model: h.defaultMdl, Thinking: h.thinking, Approval: "auto-edits",
+			ID: info.ID, Path: info.Path, Project: g.Key, CWD: cwd, BaseCWD: baseCWD, OriginCWD: info.CWD,
+			TrustRoot: projectTrustRoot(baseCWD), Title: name, Status: "done", Branch: branch, Env: env, Worktree: worktreeName,
+			Model: h.defaultMdl, Thinking: h.thinking, Approval: h.defaultApproval,
 			Started: relativeTime(info.Created), Updated: updated, Modified: info.Modified.UnixMilli(),
 			Note: messageNote(updated, info.MessageCount), Welcome: info.MessageCount == 0, Real: true,
 		}
@@ -232,6 +270,9 @@ func (h *desktopHost) bootstrap(a *app) error {
 		s.Context.Limit = s.modelContext()
 		a.sessions = append(a.sessions, s)
 		paths[info.Path] = s
+	}
+	if staleWorktrees {
+		_ = h.saveWorktrees()
 	}
 	parents := make(map[string]string, len(infos))
 	for _, info := range infos {
@@ -281,7 +322,7 @@ func (h *desktopHost) loadProviderCatalog(a *app) error {
 	}
 	out := make([]provider, 0, len(catalog)+1)
 	for _, p := range catalog {
-		item := provider{ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, API: p.API}
+		item := provider{ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, API: p.API, APIKeySource: p.APIKeySource}
 		for _, m := range p.Models {
 			item.Models = append(item.Models, model{
 				ID: m.ID, Name: m.Name, Context: m.ContextWindow, MaxOut: m.MaxTokens,
@@ -428,9 +469,16 @@ func (h *desktopHost) servicesFor(cwd string) (*sdk.AgentSessionServices, error)
 		h.mu.Unlock()
 		return svcs, nil
 	}
+	disabledSkills := make([]string, 0, len(h.disabledSkills))
+	for name, disabled := range h.disabledSkills {
+		if disabled {
+			disabledSkills = append(disabledSkills, name)
+		}
+	}
 	h.mu.Unlock()
 	svcs, err := sdk.CreateAgentSessionServices(sdk.CreateAgentSessionServicesOptions{
-		CWD: cwd, AgentDir: h.agentDir, ProjectTrusted: h.trusted,
+		CWD: cwd, AgentDir: h.agentDir, ProjectTrusted: h.projectTrusted(cwd),
+		DisabledSkills: disabledSkills,
 	})
 	if err != nil {
 		return nil, err
@@ -491,16 +539,17 @@ func (h *desktopHost) newSession(a *app, g projectGroup) (*session, error) {
 	}
 	sid = sess.ID()
 	s := &session{
-		ID: sess.ID(), Path: sess.File(), Project: g.Key, CWD: cwd,
-		Title: "Untitled session", Status: "idle", Branch: gitBranch(cwd), Env: "Local",
+		ID: sess.ID(), Path: sess.File(), Project: g.Key, CWD: cwd, BaseCWD: cwd, OriginCWD: cwd,
+		TrustRoot: projectTrustRoot(cwd), Title: "Untitled session", Status: "idle", Branch: gitBranch(cwd), Env: "Local",
 		Model: model.Provider + "/" + model.ID, ModelName: model.Name, ModelLimit: model.ContextWindow,
-		Thinking: string(sess.ThinkingLevel()), Approval: "auto-edits",
+		Thinking: string(sess.ThinkingLevel()), Approval: h.defaultApproval,
 		Started: "now", Updated: "now", Modified: time.Now().UnixMilli(), Welcome: true, Real: true,
 	}
 	a.applyModelFields(s)
 	a.sessions = append([]*session{s}, a.sessions...)
 	engine := &sessionEngine{id: sess.ID(), path: sess.File(), rt: rt, sess: sess}
 	h.addEngine(a, s, engine)
+	a.refreshCapabilities(s)
 	return s, nil
 }
 
@@ -567,6 +616,7 @@ func (h *desktopHost) hydrate(a *app, s *session, sess *sdk.Session) {
 		s.Context.Limit = model.ContextWindow
 	}
 	s.Thinking = string(sess.ThinkingLevel())
+	a.applySDKPlan(s, sess.Plan())
 	if s.Title == "" || s.Title == "Untitled session" {
 		if name := strings.TrimSpace(sess.Name()); name != "" {
 			s.Title = name
@@ -574,8 +624,15 @@ func (h *desktopHost) hydrate(a *app, s *session, sess *sdk.Session) {
 	}
 	s.SkillNames = sess.SkillNames()
 	s.MCPServers = sess.MCPServerNames()
+	s.PluginNames = sess.PluginNames()
+	s.PluginDiags = nil
+	for _, diag := range sess.PluginDiagnostics() {
+		s.PluginDiags = append(s.PluginDiags, diag.Error())
+	}
 	s.Context.Skills = len(s.SkillNames)
 	s.Context.MCP = len(s.MCPServers)
+	s.Context.Plugins = len(s.PluginNames)
+	a.refreshCapabilities(s)
 	a.applyModelFields(s)
 	a.renderSDKMessages(s, sess, nil)
 	a.updateRealUsage(s, sess)
@@ -594,6 +651,10 @@ func (h *desktopHost) hydrate(a *app, s *session, sess *sdk.Session) {
 }
 
 func (h *desktopHost) send(a *app, s *session, text string, attachments []string) error {
+	loaded, err := loadHostAttachments(attachments)
+	if err != nil {
+		return err
+	}
 	e, err := h.ensureEngine(a, s)
 	if err != nil {
 		return err
@@ -605,11 +666,16 @@ func (h *desktopHost) send(a *app, s *session, text string, attachments []string
 	if strings.HasPrefix(s.Title, "Untitled") {
 		s.Title = titleFor(text)
 	}
+	_ = h.captureCheckpoint(s, e.sess.LeafID())
 	prompt := text
-	if len(attachments) > 0 {
+	var images []sdk.ImageAttachment
+	if len(loaded) > 0 {
 		var lines []string
-		for _, path := range attachments {
-			lines = append(lines, "- "+path)
+		for _, item := range loaded {
+			lines = append(lines, "- "+item.Path)
+			if item.Image != nil {
+				images = append(images, *item.Image)
+			}
 		}
 		prompt += "\n\nAttached files:\n" + strings.Join(lines, "\n")
 	}
@@ -619,7 +685,7 @@ func (h *desktopHost) send(a *app, s *session, text string, attachments []string
 	s.Modified = time.Now().UnixMilli()
 	a.scrollToEnd = true
 	go func() {
-		if err := e.sess.Prompt(context.Background(), prompt); err != nil {
+		if err := e.sess.Prompt(context.Background(), prompt, sdk.PromptOptions{Images: images}); err != nil {
 			h.dispatch(a, s, e, sdk.Event{Type: "host_error", Result: err.Error()})
 		}
 	}()
@@ -731,21 +797,21 @@ func approvalPolicy(mode, tool string) (allow bool, block string) {
 		return true, ""
 	case "plan":
 		switch tool {
-		case "read", "ls", "grep", "find":
+		case "read", "ls", "grep", "find", "plan":
 			return true, ""
 		default:
 			return false, "Plan mode only allows read-only tools"
 		}
 	case "auto-edits":
 		switch tool {
-		case "read", "ls", "grep", "find", "edit", "write":
+		case "read", "ls", "grep", "find", "plan", "edit", "write":
 			return true, ""
 		default:
 			return false, ""
 		}
 	case "manual", "":
 		switch tool {
-		case "read", "ls", "grep", "find":
+		case "read", "ls", "grep", "find", "plan":
 			return true, ""
 		default:
 			return false, ""
@@ -775,6 +841,7 @@ func (a *app) addHostApproval(s *session, req sdk.ToolApprovalRequest) {
 	if a.win != nil {
 		a.win.Invalidate()
 	}
+	a.notifyCompletion(s)
 }
 
 func approvalCommand(req sdk.ToolApprovalRequest) string {
@@ -855,6 +922,8 @@ func (a *app) sessionByID(id string) *session {
 }
 
 func (a *app) closeHost() {
+	a.shuttingDown = true
+	a.closeTerminals()
 	if a.host != nil {
 		a.host.closeHost()
 	}

@@ -114,6 +114,9 @@ func buildRules(ts []agent.AgentTool) string {
 	case hasBash:
 		rules = append(rules, "Use bash for file operations like ls, rg, find")
 	}
+	if hasTool(ts, "plan") {
+		rules = append(rules, "Use the plan tool to track multi-step work and keep its step statuses current")
+	}
 	rules = append(rules, "Be concise in your responses", "Show file paths clearly when working with files")
 	return "- " + strings.Join(rules, "\n- ")
 }

@@ -123,16 +123,26 @@ func (a *app) shortcuts(c *ui.Context) {
 	if c.Shortcut(ui.Shift, ui.KeyTab) {
 		a.cycleApproval()
 	}
-	if c.Shortcut(0, ui.KeyEscape) {
-		if a.sidebarDrawer {
-			a.sidebarDrawer = false
-			return
+	if a.sidebarDrawer && c.Shortcut(0, ui.KeyEscape) {
+		a.sidebarDrawer = false
+		return
+	}
+	if a.dockDrawer && a.dockTab != 2 && c.Shortcut(0, ui.KeyEscape) {
+		a.dockDrawer = false
+		return
+	}
+	if a.commentRow >= 0 && c.Shortcut(0, ui.KeyEscape) {
+		a.cancelLineComment()
+		return
+	}
+	if a.messageEditID != "" && c.Shortcut(0, ui.KeyEscape) {
+		a.cancelMessageEdit(true)
+		return
+	}
+	if !a.anyOverlayOpen() && c.Shortcut(0, ui.KeyEscape) {
+		if s := a.active(); s != nil && s.Status == "running" {
+			a.stopSession(s)
 		}
-		if a.dockDrawer {
-			a.dockDrawer = false
-			return
-		}
-		a.stopOrClose()
 	}
 }
 

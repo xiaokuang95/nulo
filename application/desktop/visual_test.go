@@ -68,6 +68,15 @@ func TestNativeScreenshot(t *testing.T) {
 		}
 	case "model":
 		a.showModel = true
+	case "rewind":
+		a.rewindOpen = true
+		a.rewindSessionID = a.activeID
+		a.rewindPoints = []rewindPoint{
+			{Label: "Before: review the approval flow", Detail: "12m · 3 entries after", EntryID: "e3", SnapshotKey: "root", Snapshot: true, SnapshotFiles: 3},
+			{Label: "Before: render the plan panel", Detail: "18m · 7 entries after", EntryID: "e1", SnapshotKey: "e1", Snapshot: true, SnapshotFiles: 1},
+		}
+		a.rewindIndex = 0
+		a.rewindRestoreFiles = true
 	case "rename":
 		a.renameOpen = true
 		a.renameID = "s1"

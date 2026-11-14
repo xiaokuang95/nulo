@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -22,6 +23,15 @@ import (
 type PromptOptions struct {
 	StreamingBehavior string
 	Source            string
+	// Images append image content blocks to the user message. Data is raw
+	// base64 (without a data: prefix) and MIMEType must be image/*.
+	Images []ImageAttachment
+}
+
+// ImageAttachment is one image sent with a prompt.
+type ImageAttachment struct {
+	Data     string `json:"data"`
+	MIMEType string `json:"mimeType"`
 }
 
 type CompactionResult struct {
@@ -92,6 +102,9 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 	var configuredTools []string
 	if opt.Tools == nil {
 		s.tools = tools.Default(svcs.CWD)
+		// The plan tool is host-facing infrastructure: its updates are also
+		// persisted as custom entries and emitted as plan_update events.
+		s.tools = append(s.tools, s.planTool())
 		if s.settings != nil {
 			if configured := s.settings.GetDefaultTools(); configured != nil {
 				configuredTools = configured
@@ -155,7 +168,17 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 		IncludeDefaults: true,
 		SkillPaths:      skillPaths,
 	})
-	s.skills = loaded.Skills
+	if len(svcs.DisabledSkills) > 0 {
+		filtered := make([]skills.Skill, 0, len(loaded.Skills))
+		for _, skill := range loaded.Skills {
+			if !svcs.DisabledSkills[skill.Name] {
+				filtered = append(filtered, skill)
+			}
+		}
+		s.skills = filtered
+	} else {
+		s.skills = loaded.Skills
+	}
 	s.skillDiagnostics = loaded.Diagnostics
 	cfg := mcp.Load(svcs.AgentDir, svcs.CWD, svcs.ProjectTrusted)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -393,10 +416,14 @@ func (s *Session) Send(ctx context.Context, text string, opts ...PromptOptions) 
 		s.mu.Unlock()
 		return nil, fmt.Errorf("session is streaming; set StreamingBehavior to steer or followUp")
 	}
+	if err := validateImages(opt.Images); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	if s.streaming {
 		beh := opt.StreamingBehavior
 		s.mu.Unlock()
-		user := ai.UserMessage(text, time.Now().UnixMilli())
+		user := userMessage(text, opt.Images, time.Now().UnixMilli())
 		if beh == "followUp" {
 			return nil, s.FollowUp(ctx, user)
 		}
@@ -435,7 +462,7 @@ func (s *Session) Send(ctx context.Context, text string, opts ...PromptOptions) 
 		text = expanded
 	}
 	s.pluginBeforeAgentStart(ctx, text)
-	user := ai.UserMessage(text, time.Now().UnixMilli())
+	user := userMessage(text, opt.Images, time.Now().UnixMilli())
 	cfg := s.config()
 	ac := agent.Context{
 		Messages: append([]ai.Message(nil), s.manager.Project().Messages...),
@@ -1257,4 +1284,33 @@ func sourceForPrompt(opt PromptOptions) string {
 		return opt.Source
 	}
 	return "rpc"
+}
+
+func validateImages(images []ImageAttachment) error {
+	for i, image := range images {
+		if image.MIMEType == "" || !strings.HasPrefix(image.MIMEType, "image/") {
+			return fmt.Errorf("image %d: MIMEType must be image/*", i+1)
+		}
+		if image.Data == "" {
+			return fmt.Errorf("image %d: data is empty", i+1)
+		}
+		if _, err := base64.StdEncoding.DecodeString(image.Data); err != nil {
+			return fmt.Errorf("image %d: data is not base64: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+func userMessage(text string, images []ImageAttachment, ts int64) ai.Message {
+	if len(images) == 0 {
+		return ai.UserMessage(text, ts)
+	}
+	blocks := make([]ai.ContentBlock, 0, len(images)+1)
+	if text != "" {
+		blocks = append(blocks, ai.TextBlock(text))
+	}
+	for _, image := range images {
+		blocks = append(blocks, ai.ImageBlock(image.Data, image.MIMEType))
+	}
+	return ai.Message{Role: "user", Timestamp: ts, Content: ai.EncodeContentBlocks(blocks)}
 }

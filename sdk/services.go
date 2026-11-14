@@ -1,6 +1,7 @@
 package sdk
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
@@ -26,6 +27,9 @@ type CreateAgentSessionServicesOptions struct {
 	NoPlugins   bool
 	PluginUI    *PluginUI
 	PluginMode  string
+	// DisabledSkills removes matching skills from the model-facing skill list.
+	// Hosts persist their own enable switches and pass the disabled names here.
+	DisabledSkills []string
 }
 
 type AgentSessionServices struct {
@@ -39,6 +43,7 @@ type AgentSessionServices struct {
 	SettingsManager *SettingsManager
 	PluginPaths     []string
 	NoPlugins       bool
+	DisabledSkills  map[string]bool
 
 	plugins       *plugin.Host
 	pluginOnce    sync.Once
@@ -57,6 +62,19 @@ type AgentSessionServices struct {
 	pluginFlags      map[string]any
 	busMu            sync.Mutex
 	busSubscribers   map[string][]func(any)
+}
+
+func disabledSkillSet(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 func CreateAgentSessionServices(opt CreateAgentSessionServicesOptions) (*AgentSessionServices, error) {
@@ -86,6 +104,7 @@ func CreateAgentSessionServices(opt CreateAgentSessionServicesOptions) (*AgentSe
 		NoPlugins:        opt.NoPlugins,
 		pluginMode:       opt.PluginMode,
 		uiBridge:         opt.PluginUI,
+		DisabledSkills:   disabledSkillSet(opt.DisabledSkills),
 		dynamicProviders: ai.Providers{},
 		pluginMCP:        map[string]mcp.ServerConfig{},
 		virtualModels:    map[string]map[string]any{},

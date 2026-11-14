@@ -12,6 +12,7 @@ var icons = func() map[string]*ui.SVG {
 		"chevron-right": `<path d="m9 18 6-6-6-6"/>`,
 		"chevron-left":  `<path d="m15 18-6-6 6-6"/>`,
 		"folder":        `<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/>`,
+		"image":         `<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>`,
 		"git-branch":    `<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>`,
 		"settings":      `<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/>`,
 		"panel-left":    `<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/>`,

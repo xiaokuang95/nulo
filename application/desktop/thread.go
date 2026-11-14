@@ -119,7 +119,7 @@ func (a *app) sessionMenu(c *ui.Context, m *ui.Menu, s *session) {
 	}
 	m.Separator()
 	if m.Item("Delete session").Disabled(len(a.sessions) <= 1).Chosen() {
-		a.deleteSession(s.ID)
+		a.beginDelete(s)
 	}
 }
 
@@ -165,8 +165,13 @@ func (a *app) forkSession(s *session) {
 func (a *app) conversation(c *ui.Context, s *session) {
 	scroll := ui.Scroll(c).Grow(1).MinHeight(0).TrackScroll(&a.threadScroll)
 	scroll.Children(func() {
+		pad := float32(20)
+		gap := float32(32)
+		if a.compactDensity {
+			pad, gap = 12, 20
+		}
 		content := ui.Column(c).WidthPercent(100).MaxWidth(820).AlignSelf(ui.Center).
-			Padding(20, 30, 32, 30)
+			Padding(pad, 30, gap, 30)
 		content.Children(func() {
 			a.threadMeta(c, s)
 			if s.Welcome {
@@ -207,7 +212,11 @@ func (a *app) messageView(c *ui.Context, s *session, mi int) {
 	p := a.pal()
 	switch m.Role {
 	case "user":
-		ui.Row(c).FillWidth().Justify(ui.End).Margin(0, 0, 28, 0).Children(func() {
+		bottom := float32(28)
+		if a.compactDensity {
+			bottom = 16
+		}
+		ui.Row(c).FillWidth().Justify(ui.End).Margin(0, 0, bottom, 0).Children(func() {
 			bubble := ui.Column(c).MaxWidth(620).Padding(11, 14, 12, 14).
 				Radius(12, 12, 3, 12).Border(1, p.line).Background(p.userBubble)
 			bubble.Children(func() {
@@ -215,19 +224,27 @@ func (a *app) messageView(c *ui.Context, s *session, mi int) {
 				label.Children(func() {
 					a.icon(c, "message", 11, p.text4)
 					ui.Text(c, "YOU").Font("monospace").FontSize(10).TextColor(p.text4).LetterSpacing(0.5)
-					if m.Time != "" {
+					if a.showTimestamps && m.Time != "" {
 						ui.Text(c, "· "+m.Time).Font("monospace").FontSize(10).TextColor(p.text4)
 					}
+					ui.Spacer(c)
+					a.messageMenuButton(c, s, m, mi)
 				})
 				ui.Text(c, m.Text).FontSize(14).LineHeight(1.62).TextColor(p.text2).Selectable()
 				if len(m.Attachments) > 0 {
 					tray := ui.Row(c).Gap(5).Margin(5, 0, 0, 0).Wrap()
 					tray.Children(func() {
 						for _, path := range m.Attachments {
-							chip := ui.Row(c).Height(24).Padding(0, 7).Gap(5).Radius(5).
+							height := float32(24)
+							if isImagePath(path) {
+								height = 38
+							}
+							chip := ui.Row(c).Height(height).Padding(0, 7).Gap(5).Radius(5).
 								Border(1, p.line).Background(p.surface2).AlignItems(ui.Center)
 							chip.Children(func() {
-								a.icon(c, "paperclip", 10, p.text4)
+								if !a.imageThumbButton(c, path, 32) {
+									a.icon(c, "paperclip", 10, p.text4)
+								}
 								ui.Text(c, filepath.Base(path)).Font("monospace").FontSize(10).
 									TextColor(p.text3).SingleLine()
 							})
@@ -245,8 +262,12 @@ func (a *app) messageView(c *ui.Context, s *session, mi int) {
 			})
 		})
 	case "assistant":
-		ui.Column(c).FillWidth().Gap(11).Margin(0, 0, 4, 0).Children(func() {
-			a.assistantHead(c, s, m)
+		gap := float32(11)
+		if a.compactDensity {
+			gap = 7
+		}
+		ui.Column(c).FillWidth().Gap(gap).Margin(0, 0, 4, 0).Children(func() {
+			a.assistantHead(c, s, m, mi)
 			for bi := range m.Blocks {
 				a.blockView(c, s, mi, bi)
 			}
@@ -254,7 +275,7 @@ func (a *app) messageView(c *ui.Context, s *session, mi int) {
 	}
 }
 
-func (a *app) assistantHead(c *ui.Context, s *session, m *message) {
+func (a *app) assistantHead(c *ui.Context, s *session, m *message, mi int) {
 	p := a.pal()
 	ui.Row(c).FillWidth().Height(22).Gap(8).AlignItems(ui.Center).Children(func() {
 		avatar := ui.Box(c).Size(22, 22).Radius(6).Background(p.accent).Center()
@@ -264,7 +285,10 @@ func (a *app) assistantHead(c *ui.Context, s *session, m *message) {
 		ui.Text(c, "nulo").FontSize(13).FontWeight(600).TextColor(p.text2)
 		ui.Text(c, s.modelName()).Font("monospace").FontSize(11).TextColor(p.text4).SingleLine()
 		ui.Spacer(c)
-		ui.Text(c, m.Time).Font("monospace").FontSize(11).TextColor(p.text4)
+		if a.showTimestamps {
+			ui.Text(c, m.Time).Font("monospace").FontSize(11).TextColor(p.text4)
+		}
+		a.messageMenuButton(c, s, m, mi)
 	})
 }
 
@@ -318,7 +342,7 @@ func (a *app) markdownBlock(c *ui.Context, text string) {
 func (a *app) thinkingBlock(c *ui.Context, b *block) {
 	p := a.pal()
 	box := ui.Column(c).FillWidth()
-	open := ui.Local(box, "open", func() bool { return false })
+	open := ui.Local(box, "open", func() bool { return !a.collapseThinking })
 	head := ui.ButtonBase(c).Height(20).Padding(0, 0).Gap(6).Justify(ui.Start).
 		Background(ui.Transparent).Label("Thinking")
 	if *open {

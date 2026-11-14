@@ -20,7 +20,21 @@ needs to render around a session:
 - `ListAllSessions(agentDir)` lists session files across every working directory,
   newest first, so a host can build a project switcher before choosing a CWD.
 - `ListProviders(agentDir)` resolves `models.json` into provider names, endpoints,
-  context windows, output limits and image/reasoning flags.
+  context windows, output limits, image/reasoning flags and the API-key source
+  (`auth`, `models`, `env`). `SetProviderAPIKey` / `ClearProviderAPIKey` write the
+  agent's 0600 `auth.json` without exposing the key to a host UI.
+- `ListMCPServers` exposes merged global/project MCP entries, including disabled
+  servers, without leaking commands or credentials. `ListSkills` discovers the
+  skills a workspace would load. `CreateAgentSessionServicesOptions.DisabledSkills`
+  filters skills by name, so a host can offer persisted enable switches.
+- `PromptOptions.Images` attaches base64 image content blocks to a user message;
+  `ImageAttachment` carries the data and MIME type. `TestProviderModel` sends a
+  tiny probe through a configured provider, so a host can check its key and
+  endpoint without creating a session.
+- `Session.SetPlan` / `Session.Plan` expose a structured task plan persisted as a
+  custom session entry. `SetPlan` emits `plan_update` with an `Event.Plan`, and
+  the default toolset includes a `plan` tool that calls it. An explicit
+  `defaultTools` setting must include `"plan"` to keep it.
 - `RuntimeOptions.ApproveTool` installs a default approval hook for sessions
   created, resumed or forked by that runtime. `SessionStartOptions.ApproveTool`
   overrides it per session. A denial becomes a tool error; returning an error
