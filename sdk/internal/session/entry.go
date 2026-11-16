@@ -7,15 +7,23 @@ import (
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
 )
 
-const CurrentVersion = 3
+// CurrentVersion is the nulo session schema version. Nulo owns this format;
+// Pi sessions are imported, not kept wire-compatible.
+const CurrentVersion = 1
+
+// Format identifies a nulo session header. Older files without this field are
+// legacy Pi logs and are accepted for read compatibility.
+const Format = "nulo"
 
 type Header struct {
 	Type          string `json:"type"`
+	Format        string `json:"format,omitempty"`
 	Version       int    `json:"version"`
 	ID            string `json:"id"`
 	Timestamp     string `json:"timestamp"`
 	CWD           string `json:"cwd"`
 	ParentSession string `json:"parentSession,omitempty"`
+	ImportedFrom  string `json:"importedFrom,omitempty"`
 }
 
 type Entry struct {

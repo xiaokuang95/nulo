@@ -71,12 +71,13 @@ type Session struct {
 	mcp              []*mcp.Client
 	servers          []mcp.Connected
 
-	// Per-tool exposure from mcp.json; a server's tools can be split across
-	// direct, codemode, deferred, and hidden.
-	toolExposure   map[string]mcp.Exposure
-	toolNamespace  map[string]string
-	pendingTools   []agent.AgentTool
-	mcpDiagnostics []string
+	// Per-tool exposure from mcp.json or plugin declarations; a source's tools
+	// can be split across direct, codemode, deferred, and hidden.
+	toolExposure     map[string]mcp.Exposure
+	toolSourceByName map[string]string
+	toolNamespace    map[string]string
+	pendingTools     []agent.AgentTool
+	mcpDiagnostics   []string
 
 	// Native plugins. The host is owned by Services; these maps bind its
 	// registrations to this session.
@@ -98,13 +99,21 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 		system:           opt.SystemPrompt,
 		approveTool:      opt.ApproveTool,
 		pluginToolByName: map[string]pluginToolBinding{},
+		toolExposure:     map[string]mcp.Exposure{},
+		toolSourceByName: map[string]string{},
 	}
 	var configuredTools []string
 	if opt.Tools == nil {
-		s.tools = tools.Default(svcs.CWD)
+		if svcs.Registry != nil {
+			s.tools = svcs.Registry.AgentTools()
+		} else {
+			s.tools = tools.Default(svcs.CWD)
+		}
 		// The plan tool is host-facing infrastructure: its updates are also
 		// persisted as custom entries and emitted as plan_update events.
-		s.tools = append(s.tools, s.planTool())
+		if !hasTool(s.tools, "plan") {
+			s.tools = append(s.tools, s.planTool())
+		}
 		if s.settings != nil {
 			if configured := s.settings.GetDefaultTools(); configured != nil {
 				configuredTools = configured
@@ -184,17 +193,69 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Registry tools can use the same exposure rules as MCP tools. Keep
+	// indirect tools in the catalogue while removing them from the active set.
+	var registryCatalogExtra []agent.AgentTool
+	registryCodemode := false
+	registryDeferred := false
+	if svcs.Registry != nil {
+		for _, pluginTool := range svcs.Registry.Tools() {
+			def := pluginTool.Definition()
+			s.toolSourceByName[def.Name] = "plugin"
+			switch exposure := normalizeToolExposure(def.Exposure); exposure {
+			case "hidden":
+				s.tools = filterOutTools(s.tools, map[string]bool{def.Name: true})
+			case "codemode", "deferred":
+				s.tools = filterOutTools(s.tools, map[string]bool{def.Name: true})
+				registryCatalogExtra = append(registryCatalogExtra, agentToolFromPlugin(pluginTool))
+				s.toolExposure[def.Name] = mcp.Exposure(exposure)
+				if exposure == "codemode" {
+					registryCodemode = true
+				} else {
+					registryDeferred = true
+				}
+			}
+		}
+	}
 	// The catalogue starts as the built-in tools; a host may have narrowed the
 	// active set, but codemode can still call everything the catalogue holds.
 	s.catalog = append([]agent.AgentTool(nil), s.tools...)
+	s.catalog = append(s.catalog, registryCatalogExtra...)
 
 	// Exposure decides where each tool lands. codemode keeps them out of the
 	// model's tool list so a large server does not cost every request; deferred
 	// waits for tool_search; direct declares them like built-in tools; hidden
 	// drops them.
-	s.toolExposure = map[string]mcp.Exposure{}
+	if s.toolExposure == nil {
+		s.toolExposure = map[string]mcp.Exposure{}
+	}
 	s.toolNamespace = map[string]string{}
 	s.mcpDiagnostics = append(s.mcpDiagnostics, cfg.Errors...)
+	// Plugin-declared MCP servers join the configured set before connecting.
+	// A file entry of the same name wins, so a user can override a plugin.
+	if svcs.Registry != nil {
+		for _, server := range svcs.Registry.MCPServers() {
+			if _, exists := cfg.Servers[server.Name]; exists {
+				continue
+			}
+			exposure := server.Exposure
+			if exposure == "" {
+				exposure = string(mcp.ExposureDirect)
+			}
+			cfg.Servers[server.Name] = mcp.ServerConfig{
+				Command:      server.Command,
+				Args:         append([]string(nil), server.Args...),
+				Env:          cloneStringMap(server.Env),
+				CWD:          server.CWD,
+				URL:          server.URL,
+				Type:         server.Transport,
+				Headers:      cloneStringMap(server.Headers),
+				Exposure:     exposure,
+				ToolExposure: cloneStringMap(server.ToolExposure),
+				Description:  server.Description,
+			}
+		}
+	}
 	// Extension-registered servers join the configured set before connecting.
 	// A file entry of the same name wins, as Pi's mcp.json precedence does.
 	if svcs.plugins != nil {
@@ -208,8 +269,8 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 	}
 
 	s.servers = mcp.ConnectAll(ctx, cfg.Servers)
-	autoCodemode := false
-	deferred := false
+	autoCodemode := registryCodemode
+	deferred := registryDeferred
 	for _, srv := range s.servers {
 		s.mcp = append(s.mcp, srv.Client)
 		// Pi decides from the configuration, not from the tools that connected,
@@ -222,6 +283,7 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 		}
 		for _, entry := range srv.Tools {
 			s.toolExposure[entry.Tool.Name] = entry.Exposure
+			s.toolSourceByName[entry.Tool.Name] = "mcp"
 			s.toolNamespace[entry.Tool.Name] = mcp.Namespace(srv.Name)
 			switch entry.Exposure {
 			case mcp.ExposureHidden:
@@ -256,8 +318,13 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 	if containsString(configuredTools, "codemode") {
 		s.ensureCodemodeLocked(true)
 	}
-	s.ensureSystem()
 	svcs.bindPluginSession(s)
+	if svcs.Registry != nil {
+		if err := svcs.Registry.RunSessionStart(context.Background(), s); err != nil {
+			return nil, fmt.Errorf("plugin session start: %w", err)
+		}
+	}
+	s.ensureSystem()
 	reason := opt.startReason
 	if reason == "" {
 		reason = "startup"
@@ -270,6 +337,15 @@ func newSession(svcs *AgentSessionServices, mgr *session.Manager, opt SessionSta
 	return s, nil
 }
 
+func normalizeToolExposure(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "codemode", "deferred", "hidden":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return "direct"
+	}
+}
+
 func hasTool(tools []agent.AgentTool, name string) bool {
 	for _, tool := range tools {
 		if tool.Name == name {
@@ -277,6 +353,17 @@ func hasTool(tools []agent.AgentTool, name string) bool {
 		}
 	}
 	return false
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func containsString(values []string, target string) bool {
@@ -313,6 +400,19 @@ func (s *Session) ensureSystem() {
 		NoContextFiles: s.services.NoContextFiles,
 		ProjectTrusted: s.services.ProjectTrusted,
 	})
+	if s.services.Registry != nil {
+		for _, ps := range s.services.Registry.PromptSections() {
+			body, err := ps.Build(context.Background(), s)
+			if err != nil || body == "" {
+				continue
+			}
+			name := ps.Name
+			if _, exists := sec[name]; exists {
+				name = "plugin." + name
+			}
+			sec[name] = body
+		}
+	}
 	wrapped := prompt.WrapSections(sec)
 	for _, m := range s.manager.Project().Messages {
 		if m.Role == "system" {
@@ -360,8 +460,12 @@ func (s *Session) fire(ev Event) {
 	ls := append([]*subscription(nil), s.listeners...)
 	s.mu.Unlock()
 	for _, sub := range ls {
-		if sub.fn != nil {
-			sub.fn(ev)
+		// Read fn under the lock: Unsubscribe clears it from another goroutine.
+		s.mu.Lock()
+		fn := sub.fn
+		s.mu.Unlock()
+		if fn != nil {
+			fn(ev)
 		}
 	}
 }
@@ -385,6 +489,9 @@ func (s *Session) onAgent(ev agent.Event) {
 				s.persistErr = err
 			}
 			s.mu.Unlock()
+		}
+		if s.services.Registry != nil {
+			_ = s.services.Registry.RunMessageEnd(context.Background(), s, *ev.Message)
 		}
 	}
 	s.fire(ev)
@@ -461,6 +568,17 @@ func (s *Session) Send(ctx context.Context, text string, opts ...PromptOptions) 
 	if expanded, ok := skills.ExpandCommand(text, s.skills); ok {
 		text = expanded
 	}
+	if s.services.Registry != nil {
+		in := &PromptInput{Text: text, Source: sourceForPrompt(opt), Images: opt.Images}
+		if err := s.services.Registry.RunBeforeSend(ctx, s, in); err != nil {
+			return nil, err
+		}
+		text = in.Text
+		opt.Images = in.Images
+		if err := validateImages(opt.Images); err != nil {
+			return nil, err
+		}
+	}
 	s.pluginBeforeAgentStart(ctx, text)
 	user := userMessage(text, opt.Images, time.Now().UnixMilli())
 	cfg := s.config()
@@ -475,11 +593,23 @@ func (s *Session) Send(ctx context.Context, text string, opts ...PromptOptions) 
 	return msgs, err
 }
 
-func (s *Session) config() agent.Config {
-	fn := s.services.StreamFn
-	if fn == nil {
-		fn = ai.StreamForDir(s.services.AgentDir)
+func (s *Session) streamFn() StreamFn {
+	if s.services != nil {
+		if s.services.StreamFn != nil {
+			return s.services.StreamFn
+		}
+		if s.services.Registry != nil {
+			if fn := s.services.Registry.StreamFn(s.model); fn != nil {
+				return fn
+			}
+		}
+		return ai.StreamForDir(s.services.AgentDir)
 	}
+	return ai.StreamForDir("")
+}
+
+func (s *Session) config() agent.Config {
+	fn := s.streamFn()
 	mgr := s.manager
 	return agent.Config{
 		Model:         s.model,
@@ -503,10 +633,42 @@ func (s *Session) config() agent.Config {
 			if err != nil || result != nil && result.Block {
 				return result, err
 			}
+			if s.services.Registry != nil {
+				decision, err := s.services.Registry.RunBeforeTool(ctx, s, ToolCall{ID: call.ID, Name: call.Name, Arguments: args})
+				if err != nil {
+					return &agent.BeforeToolCallResult{Block: true, Reason: err.Error(), Terminate: true}, nil
+				}
+				if decision != nil && decision.Block {
+					return &agent.BeforeToolCallResult{Block: true, Reason: decision.Reason}, nil
+				}
+			}
 			return s.hostBeforeToolCall(ctx, call, args), nil
 		},
 		AfterToolCall: func(ctx context.Context, assistant ai.Message, call ai.ContentBlock, args map[string]any, result agent.ToolResult, isError bool) (*agent.AfterToolCallResult, error) {
-			return s.pluginAfterToolCall(ctx, assistant, call, args, result, isError)
+			patched, err := s.pluginAfterToolCall(ctx, assistant, call, args, result, isError)
+			if err != nil {
+				return patched, err
+			}
+			if patched != nil {
+				if patched.Content != nil {
+					result.Content = patched.Content
+				}
+				if patched.Details != nil {
+					result.Details = patched.Details
+				}
+				if patched.IsError != nil {
+					result.IsError = *patched.IsError
+				}
+				if patched.Terminate != nil {
+					result.Terminate = *patched.Terminate
+				}
+			}
+			if s.services.Registry != nil {
+				if err := s.services.Registry.RunAfterTool(ctx, s, ToolCall{ID: call.ID, Name: call.Name, Arguments: args}, result); err != nil {
+					return nil, err
+				}
+			}
+			return patched, nil
 		},
 		PrepareRequest: func(ctx context.Context, c agent.Context, model ai.Model) agent.Context {
 			c.Messages = s.pluginPrepareRequest(ctx, mgr.Project().Messages)
@@ -630,6 +792,9 @@ func (s *Session) shutdown(reason, target string) {
 	s.mu.Unlock()
 	if reason == "" {
 		reason = "quit"
+	}
+	if s.services != nil && s.services.Registry != nil {
+		_ = s.services.Registry.RunSessionEnd(context.Background(), s)
 	}
 	data := map[string]any{"type": "session_shutdown", "reason": reason}
 	if target != "" {
@@ -794,10 +959,7 @@ func sessionSys(p session.Projection) *ai.Message {
 }
 
 func (s *Session) summarize(ctx context.Context, serialized string) (string, *ai.Usage, error) {
-	fn := s.services.StreamFn
-	if fn == nil {
-		fn = ai.StreamForDir(s.services.AgentDir)
-	}
+	fn := s.streamFn()
 	tr := ai.Transcript{Messages: []ai.Message{
 		ai.SystemMessage(session.SummarizationSystemPrompt, time.Now().UnixMilli()),
 		ai.UserMessage(serialized, time.Now().UnixMilli()),

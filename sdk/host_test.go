@@ -14,10 +14,14 @@ import (
 func TestToolApprovalBlocksAndAllows(t *testing.T) {
 	cwd := t.TempDir()
 	target := filepath.Join(cwd, "blocked.txt")
+	shell, command := "bash", "touch "+target
+	if runtime.GOOS == "windows" {
+		shell, command = "powershell", "Set-Content -Path '"+target+"' -Value x"
+	}
 	p := ai.NewFauxProvider()
 	p.SetResponses(
 		ai.FauxAssistantBlocks([]ai.ContentBlock{
-			ai.ToolCallBlock("call-1", "bash", map[string]any{"command": "touch " + target}),
+			ai.ToolCallBlock("call-1", shell, map[string]any{"command": command}),
 		}, ai.StopToolUse),
 		ai.FauxAssistant("done"),
 	)
@@ -47,7 +51,7 @@ func TestToolApprovalBlocksAndAllows(t *testing.T) {
 	if _, err := sess.Send(context.Background(), "write it"); err != nil {
 		t.Fatal(err)
 	}
-	if len(requests) != 1 || requests[0].ToolName != "bash" || requests[0].CWD != cwd {
+	if len(requests) != 1 || requests[0].ToolName != shell || requests[0].CWD != cwd {
 		t.Fatalf("approval requests = %+v", requests)
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
@@ -79,7 +83,7 @@ func TestListAllSessionsAndProviderModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []AgentTool{}})
 	if err != nil {
 		t.Fatal(err)
 	}

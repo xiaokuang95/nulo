@@ -27,8 +27,8 @@ go build -o /tmp/nulo-dev .
 NULO_WORKSPACE=/path/to/repo /tmp/nulo-dev
 ```
 
-`NULO_HOME`、`NULO_CODING_AGENT_DIR`、`NULO_CODING_AGENT_SESSION_DIR`
-沿用 SDK 的约定。模型和供应商读取
+`NULO_HOME`、`NULO_CODING_AGENT_DIR`、`NULO_SESSION_DIR` 沿用 SDK 的约定；
+旧的 `NULO_CODING_AGENT_SESSION_DIR` 仍作为兼容项。模型和供应商读取
 `~/.nulo/agent/models.json`；默认模型、思考等级读取
 `~/.nulo/agent/settings.json`。
 

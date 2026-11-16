@@ -1,6 +1,7 @@
 # nulo
 
-Pi-compatible coding-agent Session SDK in Go.
+Coding-agent Session SDK in Go. Nulo owns its session format; Pi sessions can be
+imported one-way, but the runtime is not a Pi compatibility layer.
 
 Embed with `github.com/xiaokuang95/nulo/sdk`. TUI / Web / Desktop hosts import that package only.
 
@@ -21,8 +22,10 @@ needs to render around a session:
   newest first, so a host can build a project switcher before choosing a CWD.
 - `ListProviders(agentDir)` resolves `models.json` into provider names, endpoints,
   context windows, output limits, image/reasoning flags and the API-key source
-  (`auth`, `models`, `env`). `SetProviderAPIKey` / `ClearProviderAPIKey` write the
-  agent's 0600 `auth.json` without exposing the key to a host UI.
+  (`auth`, `models`, `env`). `AgentSessionServices.ListProviders` additionally
+  includes models declared by provider plugins. `SetProviderAPIKey` /
+  `ClearProviderAPIKey` write the agent's 0600 `auth.json` without exposing the
+  key to a host UI.
 - `ListMCPServers` exposes merged global/project MCP entries, including disabled
   servers, without leaking commands or credentials. `ListSkills` discovers the
   skills a workspace would load. `CreateAgentSessionServicesOptions.DisabledSkills`
@@ -45,9 +48,123 @@ needs to render around a session:
   releases MCP connections, plugins and other service resources. A runtime is not
   safe for concurrent use.
 
-## Plugins
+## SDK plugins
 
-Plugins have two host modes, neither of which starts Node:
+The primary extension API is a Go interface. A plugin registers any combination
+of tools, providers, hooks, commands, prompt sections, MCP servers and UI
+declarations through one registry:
+
+```go
+type MyPlugin struct{}
+
+func (MyPlugin) Name() string { return "my-plugin" }
+
+func (MyPlugin) Register(r *sdk.Registry) error {
+    if err := r.AddTool(sdk.ToolFunc{
+        Def: sdk.ToolDefinition{Name: "hello", Description: "say hi"},
+        Run: func(ctx context.Context, call sdk.ToolCall) (sdk.ToolResult, error) {
+            return sdk.ToolResult{Content: []sdk.ContentBlock{{Type: "text", Text: "hi"}}}, nil
+        },
+    }); err != nil {
+        return err
+    }
+    r.AddHooks(sdk.Hooks{
+        BeforeSend: func(ctx context.Context, sess *sdk.Session, in *sdk.PromptInput) error {
+            return nil
+        },
+    })
+    return nil
+}
+
+svcs, err := sdk.CreateAgentSessionServices(sdk.CreateAgentSessionServicesOptions{
+    CWD: cwd, AgentDir: sdk.DefaultAgentDir(),
+    Plugins: []sdk.Plugin{MyPlugin{}},
+})
+```
+
+Tools can set `ToolDefinition.Exposure` to `direct` (default), `codemode`,
+`deferred` or `hidden`; codemode/deferred tools stay in the catalogue without
+being declared on every request.
+
+Built-in file/shell tools are registered through the same `Tool` interface. The
+three wire protocols are provider plugins too: `sdk.ChatStream`,
+`sdk.ResponsesStream` and `sdk.MessagesStream` can back a custom supplier:
+
+```go
+r.AddProvider(sdk.ProviderFunc{
+    ProviderID: "my-supplier",
+    ModelList:  []sdk.Model{{ID: "m", Provider: "my-supplier", API: "chat"}},
+    Fn:         sdk.ChatStream,
+})
+```
+
+`Registry` also carries plugin-provided MCP server declarations and host-facing
+renderer/shortcut declarations. `Session.Commands`, `Session.RunCommand` and
+`Session.UI` expose the declarative surface to a host.
+
+## Pi session import
+
+Nulo writes its own JSONL format (`format: "nulo"`, schema version 1) and keeps
+the session tree/branch/rewind model. Existing Pi logs are read by
+`Runtime.ImportPi(path)`, which converts messages, tree links, model/thinking
+changes, compaction, branch summaries and labels into a new nulo session. Pi
+logs are never written or upgraded in place.
+
+## Session storage
+
+New sessions live under:
+
+```text
+<agentDir>/sessions/<project-slug>-<short-hash>/<timestamp>_<session-id>.jsonl
+```
+
+The project directory is a readable slug of the working-directory name plus a
+short SHA-256 of the resolved CWD, not an encoded absolute path. It is short,
+stable for a project, and disambiguates projects with the same folder name.
+
+`NULO_SESSION_DIR` overrides the sessions root. The old
+`NULO_CODING_AGENT_SESSION_DIR` name is still accepted as a fallback. Old
+Pi-encoded `--...--` project directories are still read and listed so existing
+sessions are not lost, but new sessions are never written there.
+
+## Legacy plugin adapter
+
+`sdk.LoadLegacyPlugin` loads an existing native-library or stdio plugin and
+exposes its static tools, commands, providers, MCP declarations and UI
+declarations through `sdk.Registry`:
+
+```go
+legacy, err := sdk.LoadLegacyPlugin(sdk.LegacyPluginOptions{
+    Path: pluginPath,
+    CWD: cwd,
+    AgentDir: sdk.DefaultAgentDir(),
+})
+if err != nil {
+    return err
+}
+svcs, err := sdk.CreateAgentSessionServices(sdk.CreateAgentSessionServicesOptions{
+    CWD: cwd, AgentDir: sdk.DefaultAgentDir(),
+    Plugins: []sdk.Plugin{legacy},
+    // Use this when the same path is also configured for automatic loading.
+    NoPlugins: true,
+})
+```
+
+The adapter is deliberately load-time oriented. Dynamic `registerTool` calls
+and session-bound events still need the classic `PluginPaths` host; the adapter
+reports those limitations through `OnDiagnostic`. Tools with `codemode` and
+`deferred` exposure are preserved. Direct tools marked inactive, and hidden
+tools, are not added to the registry. Providers and MCP declarations registered
+during plugin initialization are bridged; dynamic registrations after startup
+are not. Set `ReplaceExisting` when a plugin must override a built-in tool or
+provider with the same name.
+
+## Legacy native/stdio plugins
+
+The older dynamic-library and subprocess plugin host remains available for
+session-bound events and dynamic registration, and `LoadLegacyPlugin` bridges
+its load-time capabilities into the SDK registry above. It has two host modes,
+neither of which starts Node:
 
 1. **Shared library** — an in-process `.dll`/`.so`/`.dylib` exporting the C ABI.
 2. **Protocol** — a separate executable speaking newline-delimited JSON over

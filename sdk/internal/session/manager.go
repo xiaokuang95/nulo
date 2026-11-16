@@ -52,7 +52,7 @@ func Open(path string) (*Manager, error) {
 				Type string `json:"type"`
 			}
 			if json.Unmarshal(raw, &probe) != nil || probe.Type != "session" {
-				return nil, fmt.Errorf("Session file is not a valid pi session: %s", path)
+				return nil, fmt.Errorf("Session file is not a valid nulo session: %s", path)
 			}
 			if err := json.Unmarshal(raw, &header); err != nil {
 				return nil, fmt.Errorf("session header: %w", err)
@@ -71,7 +71,6 @@ func Open(path string) (*Manager, error) {
 	if header.Type == "" {
 		return nil, fmt.Errorf("empty session file: %s", path)
 	}
-	migrated := migrateEntries(&header, entries)
 	m := &Manager{
 		cwd:        header.CWD,
 		sessionDir: filepath.Dir(path),
@@ -87,13 +86,6 @@ func Open(path string) (*Manager, error) {
 			m.leafID = entries[i].ID
 			break
 		}
-	}
-	if migrated {
-		if err := m.rewrite(); err != nil {
-			return nil, err
-		}
-		// The rewrite always ends every record with a newline.
-		terminated = true
 	}
 	if !terminated {
 		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
@@ -144,64 +136,8 @@ func readSessionRecords(path string) ([]json.RawMessage, bool, error) {
 	return records, terminated, nil
 }
 
-// migrateEntries applies Pi's v1 and v2 session migrations in memory:
-// version 1 entries get fresh IDs and a linear parent chain, and a
-// compaction's firstKeptEntryIndex becomes firstKeptEntryId; version 2's
-// hookMessage role becomes custom.
-func migrateEntries(header *Header, entries []Entry) bool {
-	version := header.Version
-	if version == 0 {
-		version = 1
-	}
-	if version >= CurrentVersion {
-		return false
-	}
-	if version < 2 {
-		used := map[string]Entry{}
-		for i := range entries {
-			id := generateID(used)
-			used[id] = entries[i]
-			entries[i].ID = id
-		}
-		previous := ""
-		for i := range entries {
-			entries[i].ParentID = parentPtr(previous)
-			previous = entries[i].ID
-			if entries[i].Type != "compaction" || len(entries[i].FirstKeptEntryIndex) == 0 {
-				continue
-			}
-			rawIndex := strings.TrimSpace(string(entries[i].FirstKeptEntryIndex))
-			// Pi only migrates a numeric index; a string or null is left
-			// alone, and an out-of-range number just drops the member.
-			if rawIndex != "null" && !strings.HasPrefix(rawIndex, "\"") {
-				var number float64
-				if json.Unmarshal(entries[i].FirstKeptEntryIndex, &number) == nil {
-					// Pi indexes the file's records including the header;
-					// entries here start after it.
-					index := int(number) - 1
-					if float64(index+1) == number && index >= 0 && index < len(entries) && entries[index].ID != "" {
-						entries[i].FirstKeptEntryID = entries[index].ID
-					} else {
-						entries[i].FirstKeptEntryID = ""
-					}
-					entries[i].FirstKeptEntryIndex = nil
-				}
-			}
-		}
-	}
-	if version < 3 {
-		for i := range entries {
-			if entries[i].Type == "message" && entries[i].Message != nil && entries[i].Message.Role == "hookMessage" {
-				entries[i].Message.Role = "custom"
-			}
-		}
-	}
-	header.Version = CurrentVersion
-	return true
-}
-
 // OpenOrCreate opens an existing session, or starts a new session at path
-// when the file is missing or empty, as Pi's SessionManager.open does.
+// when the file is missing or empty.
 func OpenOrCreate(path, cwd string) (*Manager, error) {
 	m, err := Open(path)
 	if err == nil {
@@ -268,6 +204,7 @@ func newManager(cwd, sessionDir string, persist bool, parent string) *Manager {
 		sessionID:  id,
 		header: Header{
 			Type:          "session",
+			Format:        Format,
 			Version:       CurrentVersion,
 			ID:            id,
 			Timestamp:     isoTime(now),
@@ -279,6 +216,19 @@ func newManager(cwd, sessionDir string, persist bool, parent string) *Manager {
 		m.file = filepath.Join(sessionDir, fileTimestamp(now)+"_"+id+".jsonl")
 	}
 	return m
+}
+
+// SetSessionDir changes the directory used for future forks and imports. It
+// does not move the manager's existing file.
+func (m *Manager) SetSessionDir(dir string) {
+	if dir != "" {
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+	}
+	m.mu.Lock()
+	m.sessionDir = dir
+	m.mu.Unlock()
 }
 
 func (m *Manager) CWD() string {

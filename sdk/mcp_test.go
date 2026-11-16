@@ -83,7 +83,7 @@ func mcpSession(t *testing.T, userJSON, projectJSON string, trusted bool, respon
 		return nil, err
 	}
 	t.Cleanup(func() { rt.Close() })
-	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []AgentTool{}})
 	if err != nil {
 		return nil, err
 	}

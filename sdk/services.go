@@ -1,6 +1,7 @@
 package sdk
 
 import (
+	"errors"
 	"strings"
 	"sync"
 
@@ -30,6 +31,14 @@ type CreateAgentSessionServicesOptions struct {
 	// DisabledSkills removes matching skills from the model-facing skill list.
 	// Hosts persist their own enable switches and pass the disabled names here.
 	DisabledSkills []string
+
+	// Plugins are SDK plugins loaded after the built-in tool and provider
+	// plugins. A plugin may contribute tools, providers, hooks, commands,
+	// prompt sections, MCP servers and UI declarations.
+	Plugins []Plugin
+	// NoBuiltinPlugins disables the built-in tool and provider plugins. The
+	// caller is then responsible for registering those capabilities.
+	NoBuiltinPlugins bool
 }
 
 type AgentSessionServices struct {
@@ -44,6 +53,7 @@ type AgentSessionServices struct {
 	PluginPaths     []string
 	NoPlugins       bool
 	DisabledSkills  map[string]bool
+	Registry        *Registry
 
 	plugins       *plugin.Host
 	pluginOnce    sync.Once
@@ -114,6 +124,24 @@ func CreateAgentSessionServices(opt CreateAgentSessionServicesOptions) (*AgentSe
 	if s.pluginMode == "" {
 		s.pluginMode = "print"
 	}
+	registry := NewRegistry()
+	if !opt.NoBuiltinPlugins {
+		if err := registry.Register(builtinToolsPlugin(cwd)); err != nil {
+			_ = registry.Close()
+			return nil, err
+		}
+		if err := registry.Register(builtinProvidersPlugin(agentDir)); err != nil {
+			_ = registry.Close()
+			return nil, err
+		}
+	}
+	for _, p := range opt.Plugins {
+		if err := registry.Register(p); err != nil {
+			_ = registry.Close()
+			return nil, err
+		}
+	}
+	s.Registry = registry
 	s.initPluginMaps()
 	s.ensurePlugins()
 	return s, nil
@@ -127,8 +155,16 @@ func (s *AgentSessionServices) GetSettingsManager() *SettingsManager {
 
 func (s *AgentSessionServices) Close() error {
 	s.closePluginChildren()
+	var errs []error
 	if s.plugins != nil {
-		return s.plugins.Close()
+		if err := s.plugins.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	if s.Registry != nil {
+		if err := s.Registry.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }

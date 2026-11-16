@@ -12,7 +12,8 @@ type Event = agent.Event
 type Plan = agent.Plan
 type PlanStep = agent.PlanStep
 type ContentBlock = ai.ContentBlock
-type Tool = agent.AgentTool
+type AgentTool = agent.AgentTool
+type ToolResult = agent.ToolResult
 type StopReason = ai.StopReason
 type ThinkingLevel = ai.ThinkingLevel
 type Usage = ai.Usage
@@ -21,6 +22,16 @@ type SessionTreeNode = session.TreeNode
 type SessionEntry = session.Entry
 type Cost = ai.Cost
 type CostTier = ai.CostTier
+type StreamFn = ai.StreamFn
+type StreamOptions = ai.StreamOptions
+type Transcript = ai.Transcript
+type AssistantMessageEvent = ai.AssistantMessageEvent
+type EventStream = ai.EventStream
+
+// NewEventStream creates the channel-backed stream a Provider implementation
+// returns. The provider pushes AssistantMessageEvent values and ends the stream
+// with a final message.
+func NewEventStream() *EventStream { return ai.NewEventStream() }
 
 const (
 	StopStop    = ai.StopStop

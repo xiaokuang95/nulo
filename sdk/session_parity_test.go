@@ -203,3 +203,47 @@ func TestForkUnsavedSessionFails(t *testing.T) {
 		t.Fatal("forking an unsaved session must fail")
 	}
 }
+
+func TestImportPi(t *testing.T) {
+	svcs, err := CreateAgentSessionServices(CreateAgentSessionServicesOptions{
+		CWD: t.TempDir(), AgentDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := NewRuntime(RuntimeOptions{Services: svcs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	source := filepath.Join(t.TempDir(), "pi.jsonl")
+	body := strings.Join([]string{
+		`{"type":"session","version":3,"id":"pi-id","timestamp":"2024-01-01T00:00:00.000Z","cwd":"/elsewhere"}`,
+		`{"type":"model_change","id":"m1","parentId":null,"timestamp":"2024-01-01T00:00:01.000Z","provider":"faux","modelId":"faux-1"}`,
+		`{"type":"message","id":"u1","parentId":"m1","timestamp":"2024-01-01T00:00:02.000Z","message":{"role":"user","content":"hello from pi","timestamp":1}}`,
+		`{"type":"message","id":"a1","parentId":"u1","timestamp":"2024-01-01T00:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"timestamp":2,"stopReason":"stop"}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(source, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	imported, err := rt.ImportPi(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := imported.Manager().Header()
+	if header.Format != session.Format || header.Version != session.CurrentVersion || header.ImportedFrom != source {
+		t.Fatalf("header %+v", header)
+	}
+	msgs := imported.Manager().Project().Messages
+	if len(msgs) < 2 || msgs[0].ContentString() != "hello from pi" || msgs[1].ContentString() != "hi" {
+		t.Fatalf("messages %+v", msgs)
+	}
+	dir := session.SessionDirIn(DefaultSessionDir(svcs.AgentDir), svcs.CWD)
+	if filepath.Dir(imported.Manager().File()) != dir {
+		t.Fatalf("imported file %q, want dir %q", imported.Manager().File(), dir)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatal("Pi source was modified or removed")
+	}
+}

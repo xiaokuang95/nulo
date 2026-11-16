@@ -9,7 +9,10 @@ import (
 const (
 	envHome       = "NULO_HOME"
 	envAgentDir   = "NULO_CODING_AGENT_DIR"
-	envSessionDir = "NULO_CODING_AGENT_SESSION_DIR"
+	envSessionDir = "NULO_SESSION_DIR"
+	// legacyEnvSessionDir was the Pi-era name; it is still read so existing
+	// installs keep working, but new code should use NULO_SESSION_DIR.
+	legacyEnvSessionDir = "NULO_CODING_AGENT_SESSION_DIR"
 )
 
 // DefaultHomeDir is ~/.nulo, or $NULO_HOME.
@@ -32,9 +35,13 @@ func DefaultAgentDir() string {
 	return filepath.Join(DefaultHomeDir(), "agent")
 }
 
-// DefaultSessionDir is <agent>/sessions, or $NULO_CODING_AGENT_SESSION_DIR.
+// DefaultSessionDir is <agent>/sessions, or $NULO_SESSION_DIR. The old
+// $NULO_CODING_AGENT_SESSION_DIR name is accepted as a fallback.
 func DefaultSessionDir(agentDir string) string {
 	if v := os.Getenv(envSessionDir); v != "" {
+		return expandTilde(v)
+	}
+	if v := os.Getenv(legacyEnvSessionDir); v != "" {
 		return expandTilde(v)
 	}
 	if agentDir == "" {

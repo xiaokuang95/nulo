@@ -17,7 +17,7 @@ func TestNavigateTreeSummarize(t *testing.T) {
 	})
 	rt, _ := NewRuntime(RuntimeOptions{Services: svcs})
 	defer rt.Close()
-	sess, _ := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+	sess, _ := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []AgentTool{}})
 	idUser, err := sess.Manager().AppendMessage(ai.UserMessage("q", 1))
 	if err != nil {
 		t.Fatal(err)

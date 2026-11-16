@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/xiaokuang95/nulo/sdk/internal/session"
@@ -65,7 +66,7 @@ type SessionStartOptions struct {
 	// "streaming" (default, while a run is active) or "idle" (also between runs).
 	CacheWarming string
 	SystemPrompt string
-	Tools        []Tool
+	Tools        []AgentTool
 	InMemory     bool
 	// ApproveTool is consulted before each tool call. A nil function allows
 	// every call, as the SDK does without a host.
@@ -102,6 +103,7 @@ func (r *Runtime) SwitchSession(path string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	r.adoptLegacySessionDir(mgr)
 	opt := r.switchOptions()
 	// The opened session lives on disk, so later NewSession calls must not
 	// inherit an earlier in-memory choice.
@@ -121,6 +123,7 @@ func (r *Runtime) ResumeSession(path string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	r.adoptLegacySessionDir(mgr)
 	opt := r.last
 	opt.InMemory = false
 	projection := mgr.Project()
@@ -162,8 +165,20 @@ func (r *Runtime) Fork() (*Session, error) {
 	return r.replace(child, opt)
 }
 
+// ImportPi reads a Pi JSONL session, converts it to the nulo format in this
+// runtime's session directory, and switches to the imported session. Pi import
+// is one-way: nulo does not write Pi-compatible logs.
+func (r *Runtime) ImportPi(path string) (*Session, error) {
+	mgr, err := session.ImportPi(path, r.sessionDir(), r.Services.CWD)
+	if err != nil {
+		return nil, err
+	}
+	return r.ResumeSession(mgr.File())
+}
+
 // ImportFromJsonl copies a session log into this runtime's session directory
-// (never overwriting an existing file) and switches to it, as Pi's import does.
+// (never overwriting an existing file) and switches to it. This is a one-way
+// import; nulo does not write Pi-compatible logs.
 func (r *Runtime) ImportFromJsonl(path string) (*Session, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -189,7 +204,25 @@ func (r *Runtime) ImportFromJsonl(path string) (*Session, error) {
 // ListSessions returns the sessions stored for this runtime's working
 // directory, newest activity first.
 func (r *Runtime) ListSessions() ([]SessionInfo, error) {
-	return session.List(r.sessionDir())
+	seen := map[string]bool{}
+	var out []SessionInfo
+	for _, dir := range r.sessionDirs() {
+		infos, err := session.List(dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, info := range infos {
+			if seen[info.Path] {
+				continue
+			}
+			seen[info.Path] = true
+			out = append(out, info)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Modified.After(out[j].Modified)
+	})
+	return out, nil
 }
 
 // RenameSession records a new name in a stored session.
@@ -209,19 +242,21 @@ func (r *Runtime) DeleteSession(path string) error {
 }
 
 func (r *Runtime) checkSessionPath(path string) error {
-	absRoot, err := filepath.Abs(r.sessionDir())
-	if err != nil {
-		return err
-	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	rel, err := filepath.Rel(absRoot, absPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("session path is outside the session directory: %s", path)
+	for _, dir := range r.sessionDirs() {
+		absRoot, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(absRoot, absPath)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("session path is outside the session directory: %s", path)
 }
 
 func uniqueSessionPath(path string) string {
@@ -274,8 +309,8 @@ func (r *Runtime) newManager(opt SessionStartOptions) *session.Manager {
 	return session.Create(r.Services.CWD, r.sessionDir())
 }
 
-// sessionDir is settings.sessionDir when set, then the environment/default
-// sessions root with the encoded cwd appended.
+// sessionDir is settings.sessionDir when set, otherwise the nulo per-project
+// directory under the default sessions root.
 func (r *Runtime) sessionDir() string {
 	if r.Services.SettingsManager != nil {
 		if dir, err := r.Services.SettingsManager.GetSessionDir(); err == nil && dir != "" {
@@ -285,8 +320,43 @@ func (r *Runtime) sessionDir() string {
 	return session.SessionDirIn(DefaultSessionDir(r.Services.AgentDir), r.Services.CWD)
 }
 
+// legacySessionDir is the old Pi-encoded directory for the same project. It is
+// used only to keep old sessions visible; new sessions are never written there.
+func (r *Runtime) legacySessionDir() string {
+	if r.Services.SettingsManager != nil {
+		if dir, err := r.Services.SettingsManager.GetSessionDir(); err == nil && dir != "" {
+			return dir
+		}
+	}
+	return session.LegacySessionDirIn(DefaultSessionDir(r.Services.AgentDir), r.Services.CWD)
+}
+
+// adoptLegacySessionDir points future forks of an old Pi-layout session at the
+// new nulo project directory. The old file itself remains untouched.
+func (r *Runtime) adoptLegacySessionDir(mgr *session.Manager) {
+	if mgr == nil || mgr.File() == "" {
+		return
+	}
+	legacy := r.legacySessionDir()
+	if legacy == "" || legacy == r.sessionDir() {
+		return
+	}
+	if filepath.Dir(mgr.File()) == legacy {
+		mgr.SetSessionDir(r.sessionDir())
+	}
+}
+
+func (r *Runtime) sessionDirs() []string {
+	dir := r.sessionDir()
+	legacy := r.legacySessionDir()
+	if legacy == "" || legacy == dir {
+		return []string{dir}
+	}
+	return []string{dir, legacy}
+}
+
 // withSettingsDefaults fills an omitted model and thinking level from
-// settings, as Pi's SDK does. An explicit option always wins.
+// settings. An explicit option always wins.
 func (r *Runtime) withSettingsDefaults(opt SessionStartOptions) SessionStartOptions {
 	manager := r.Services.SettingsManager
 	if manager == nil {

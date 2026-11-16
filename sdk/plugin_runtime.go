@@ -33,13 +33,15 @@ func (s *Session) toolInfos() []map[string]any {
 	out := make([]map[string]any, 0, len(s.catalog))
 	for _, tool := range s.catalog {
 		exposure := "direct"
-		source := "builtin"
+		source := s.toolSourceByName[tool.Name]
+		if source == "" {
+			source = "builtin"
+		}
 		if binding, ok := s.pluginToolByName[tool.Name]; ok {
 			exposure = binding.spec.ToolExposure()
 			source = "plugin"
 		} else if configured, ok := s.toolExposure[tool.Name]; ok {
 			exposure = string(configured)
-			source = "mcp"
 		}
 		info := map[string]any{
 			"name":        tool.Name,
@@ -74,8 +76,8 @@ func (s *Session) toolSource(name string) string {
 	if _, ok := s.pluginToolByName[name]; ok {
 		return "plugin"
 	}
-	if _, ok := s.toolExposure[name]; ok {
-		return "mcp"
+	if source := s.toolSourceByName[name]; source != "" {
+		return source
 	}
 	return "builtin"
 }
@@ -274,13 +276,27 @@ func (s *AgentSessionServices) findModelByProvider(provider string) (ai.Model, e
 func (s *AgentSessionServices) availableModels() []map[string]any {
 	providers := s.providerSnapshot()
 	var out []map[string]any
+	seen := map[string]bool{}
+	add := func(model ai.Model) {
+		key := model.Provider + "/" + model.ID
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, modelJSON(model))
+	}
 	for name, config := range providers {
 		for _, entry := range config.Models {
 			model, err := providers.FindModel(name + "/" + entry.ID)
 			if err != nil {
 				continue
 			}
-			out = append(out, modelJSON(model))
+			add(model)
+		}
+	}
+	if s.Registry != nil {
+		for _, model := range s.Registry.Models() {
+			add(model)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -508,6 +524,7 @@ func (s *Session) addPluginMCP(name string, config mcp.ServerConfig) error {
 		s.servers = append(s.servers, server)
 		for _, entry := range server.Tools {
 			s.toolExposure[entry.Tool.Name] = entry.Exposure
+			s.toolSourceByName[entry.Tool.Name] = "mcp"
 			s.toolNamespace[entry.Tool.Name] = mcp.Namespace(server.Name)
 			switch entry.Exposure {
 			case mcp.ExposureHidden:

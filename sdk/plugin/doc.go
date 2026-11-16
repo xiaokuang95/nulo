@@ -1,4 +1,7 @@
-// Package sdk is the Go authoring side of nulo's plugin runtime.
+// Package sdk is the legacy authoring side of nulo's native/stdio plugin
+// runtime. New SDK-native plugins should implement sdk.Plugin and register
+// capabilities through sdk.Registry; this package remains for the adapter
+// period and for out-of-process plugins.
 //
 // A plugin can be built as a C shared library:
 //

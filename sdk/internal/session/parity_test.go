@@ -23,31 +23,25 @@ func TestNewSessionIDIsUUIDv7(t *testing.T) {
 	}
 }
 
-func TestMigrateV1ToV3(t *testing.T) {
+func TestImportPiV1(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "old.jsonl")
+	src := filepath.Join(dir, "old.jsonl")
 	body := strings.Join([]string{
 		`{"type":"session","version":1,"id":"old","timestamp":"2024-01-01T00:00:00.000Z","cwd":"/t"}`,
 		`{"type":"message","timestamp":"2024-01-01T00:00:01.000Z","message":{"role":"user","content":"hi","timestamp":1}}`,
 		`{"type":"compaction","timestamp":"2024-01-01T00:00:02.000Z","summary":"sum","firstKeptEntryIndex":1,"tokensBefore":10}`,
 		"",
 	}, "\n")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, err := Open(path)
+	m, err := ImportPi(src, filepath.Join(dir, "sessions"), "/t")
 	if err != nil {
 		t.Fatal(err)
 	}
 	entries := m.Entries()
-	if len(entries) != 2 {
-		t.Fatalf("entries %d", len(entries))
-	}
-	if entries[0].ID == "" || entries[1].ID == "" || entries[0].ID == entries[1].ID {
-		t.Fatalf("ids %+v", entries)
-	}
-	if entries[0].ParentID != nil {
-		t.Fatalf("root parent %v", *entries[0].ParentID)
+	if len(entries) != 2 || entries[0].ID == "" || entries[1].ID == "" || entries[0].ID == entries[1].ID {
+		t.Fatalf("entries %+v", entries)
 	}
 	if entries[1].ParentID == nil || *entries[1].ParentID != entries[0].ID {
 		t.Fatalf("chain %+v", entries[1])
@@ -55,31 +49,30 @@ func TestMigrateV1ToV3(t *testing.T) {
 	if entries[1].FirstKeptEntryID != entries[0].ID || entries[1].FirstKeptEntryIndex != nil {
 		t.Fatalf("firstKept %+v", entries[1])
 	}
-	if m.Header().Version != CurrentVersion {
-		t.Fatalf("version %d", m.Header().Version)
+	if m.Header().Format != Format || m.Header().Version != CurrentVersion || m.Header().ImportedFrom != src {
+		t.Fatalf("header %+v", m.Header())
 	}
-	// The migrated file is rewritten and still loads.
-	reopened, err := Open(path)
+	reopened, err := Open(m.File())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reopened.Header().Version != CurrentVersion || len(reopened.Entries()) != 2 {
+	if reopened.Header().Format != Format || len(reopened.Entries()) != 2 {
 		t.Fatalf("reopen %+v", reopened.Header())
 	}
 }
 
-func TestMigrateV2HookMessage(t *testing.T) {
+func TestImportPiV2HookMessage(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "old.jsonl")
+	src := filepath.Join(dir, "old.jsonl")
 	body := strings.Join([]string{
 		`{"type":"session","version":2,"id":"old","timestamp":"2024-01-01T00:00:00.000Z","cwd":"/t"}`,
 		`{"type":"message","id":"a","parentId":null,"timestamp":"2024-01-01T00:00:01.000Z","message":{"role":"hookMessage","content":"hi","timestamp":1}}`,
 		"",
 	}, "\n")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, err := Open(path)
+	m, err := ImportPi(src, filepath.Join(dir, "sessions"), "/t")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,5 +405,24 @@ func TestTreeLabelsAndBranches(t *testing.T) {
 	}
 	if children[0].Entry.ID != abandoned || children[1].Entry.ID != second || children[1].Label != "kept" {
 		t.Fatalf("children %+v", children)
+	}
+}
+
+func TestNewSessionFormat(t *testing.T) {
+	m := Create("/tmp/proj", t.TempDir())
+	if _, err := m.AppendMessage(ai.UserMessage("hi", 1)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(m.File())
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.SplitN(string(raw), "\n", 2)[0]
+	var header Header
+	if err := json.Unmarshal([]byte(line), &header); err != nil {
+		t.Fatal(err)
+	}
+	if header.Type != "session" || header.Format != Format || header.Version != CurrentVersion {
+		t.Fatalf("header %+v", header)
 	}
 }

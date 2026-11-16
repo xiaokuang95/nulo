@@ -208,9 +208,9 @@ func (s *AgentSessionServices) createPluginSession(ctx context.Context, arg map[
 	}, nil
 }
 
-func childToolsForOptions(cwd string, opts pluginSessionOptions) ([]Tool, error) {
+func childToolsForOptions(cwd string, opts pluginSessionOptions) ([]AgentTool, error) {
 	if opts.NoTools {
-		return []Tool{}, nil
+		return []AgentTool{}, nil
 	}
 	if len(opts.Tools) == 0 {
 		// nil tells SessionStartOptions to use the default tool set.
@@ -220,11 +220,11 @@ func childToolsForOptions(cwd string, opts pluginSessionOptions) ([]Tool, error)
 	if len(opts.Tools) == 1 && (opts.Tools[0] == "*" || opts.Tools[0] == "all") {
 		return defaults, nil
 	}
-	byName := make(map[string]Tool, len(defaults))
+	byName := make(map[string]AgentTool, len(defaults))
 	for _, tool := range defaults {
 		byName[tool.Name] = tool
 	}
-	out := make([]Tool, 0, len(opts.Tools))
+	out := make([]AgentTool, 0, len(opts.Tools))
 	seen := map[string]bool{}
 	for _, raw := range opts.Tools {
 		name := strings.TrimSpace(raw)

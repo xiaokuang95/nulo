@@ -24,3 +24,20 @@ func TestDefaultAgentDir(t *testing.T) {
 	}
 	_ = home
 }
+
+func TestDefaultSessionDirEnv(t *testing.T) {
+	tmp := t.TempDir()
+	os.Unsetenv(envSessionDir)
+	os.Unsetenv(legacyEnvSessionDir)
+	if got := DefaultSessionDir(filepath.Join(tmp, "agent")); got != filepath.Join(tmp, "agent", "sessions") {
+		t.Fatalf("default session dir = %q", got)
+	}
+	t.Setenv(legacyEnvSessionDir, filepath.Join(tmp, "legacy"))
+	if got := DefaultSessionDir(filepath.Join(tmp, "agent")); got != filepath.Join(tmp, "legacy") {
+		t.Fatalf("legacy env = %q", got)
+	}
+	t.Setenv(envSessionDir, filepath.Join(tmp, "current"))
+	if got := DefaultSessionDir(filepath.Join(tmp, "agent")); got != filepath.Join(tmp, "current") {
+		t.Fatalf("current env = %q", got)
+	}
+}

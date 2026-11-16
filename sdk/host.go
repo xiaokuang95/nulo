@@ -119,6 +119,9 @@ func ListAllSessions(agentDir string) ([]SessionInfo, error) {
 		return nil, err
 	}
 	var out []SessionInfo
+	if infos, err := session.List(root); err == nil {
+		out = append(out, infos...)
+	}
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -292,6 +295,57 @@ func ListProviders(agentDir string) ([]ProviderModels, error) {
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].ID < out[j].ID
 	})
+	return out, nil
+}
+
+// ListProviders returns the providers from models.json plus providers
+// contributed by SDK plugins. Plugin models are resolved directly; they do not
+// need a models.json entry.
+func (s *AgentSessionServices) ListProviders() ([]ProviderModels, error) {
+	out, err := ListProviders(s.AgentDir)
+	if err != nil {
+		return nil, err
+	}
+	if s.Registry == nil {
+		return out, nil
+	}
+	index := make(map[string]*ProviderModels, len(out))
+	for i := range out {
+		index[out[i].ID] = &out[i]
+	}
+	for _, provider := range s.Registry.Providers() {
+		models := provider.Models()
+		if len(models) == 0 {
+			continue
+		}
+		entry := index[provider.ID()]
+		if entry == nil {
+			out = append(out, ProviderModels{ID: provider.ID(), Name: provider.ID()})
+			entry = &out[len(out)-1]
+			index[provider.ID()] = entry
+		}
+		have := make(map[string]bool, len(entry.Models))
+		for _, model := range entry.Models {
+			have[model.ID] = true
+		}
+		for _, model := range models {
+			if have[model.ID] {
+				continue
+			}
+			have[model.ID] = true
+			entry.Models = append(entry.Models, model)
+		}
+		if entry.API == "" && len(entry.Models) > 0 {
+			entry.API = entry.Models[0].API
+		}
+		if entry.BaseURL == "" && len(entry.Models) > 0 {
+			entry.BaseURL = entry.Models[0].BaseURL
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	for i := range out {
+		sort.SliceStable(out[i].Models, func(a, b int) bool { return out[i].Models[a].ID < out[i].Models[b].ID })
+	}
 	return out, nil
 }
 

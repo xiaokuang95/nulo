@@ -4,11 +4,11 @@ import "context"
 
 func StreamSimple(ctx context.Context, model Model, tr Transcript, opts StreamOptions) *EventStream {
 	switch model.API {
-	case "openai-completions":
+	case "openai-completions", "chat":
 		return StreamOpenAICompletions(ctx, model, tr, opts)
-	case "openai-responses":
+	case "openai-responses", "responses":
 		return StreamOpenAIResponses(ctx, model, tr, opts)
-	case "anthropic-messages":
+	case "anthropic-messages", "messages":
 		return StreamAnthropicMessages(ctx, model, tr, opts)
 	case "faux", "":
 		if model.API == "" && model.Provider == "faux" {

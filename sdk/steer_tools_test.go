@@ -16,7 +16,7 @@ func TestSteerDuringSend(t *testing.T) {
 	})
 	rt, _ := NewRuntime(RuntimeOptions{Services: svcs})
 	defer rt.Close()
-	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []AgentTool{}})
 	if err != nil {
 		t.Fatal(err)
 	}

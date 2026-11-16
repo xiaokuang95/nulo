@@ -2,7 +2,9 @@
 
 ## Context
 
-nulo 是 **Pi 语义的 Go Session SDK**。TUI / Web / Desktop 只消费这份 SDK，不各自写循环。
+nulo 是 **nulo 自有的 Go Session SDK**。TUI / Web / Desktop 只消费这份 SDK，不各自写循环。
+
+> 更新（2026-11-16）：SDK 已改为 nulo 自有的插件注册表和会话格式；下文大量 Pi 对齐记录保留为历史依据，不再要求兼容 Pi 的存储路径或插件协议。
 
 仓库现状：`github.com/xiaokuang95/nulo`（公开）、Go 1.27.3、`go.mod` 已有、无 commit、无源码。
 
@@ -82,7 +84,7 @@ infos, err := rt.ListSessions()
 
 权威是树。finalized 消息立刻 append；`prepareRequest` 用投影覆盖。
 
-- 路径：`~/.nulo/agent/sessions/--<cwd 把 / \ : 换成 ->--/<timestamp>_<uuidv7>.jsonl`；cwd 先解析成绝对路径，和 Pi 的 `encodeCwdForSessionDir` 一致。
+- 路径：`<agentDir>/sessions/<project-slug>-<short-hash>/<timestamp>_<uuidv7>.jsonl`；项目键由 cwd 目录名和短 SHA-256 组成，不编码绝对路径。旧 Pi `--...--` 目录只读取、不新写。
 - 第一条 user/assistant 才建文件。`InMemory()` 不落盘。header 不是树节点；fork 带绝对 `parentSession`。
 - **写且读**：`session`、`message`（含 `bashExecution`）、`model_change`、`thinking_level_change`、`session_info`、`compaction`（`details` / `usage` / `fromHook` / `systemMessage`）、`branch_summary`（`details` / `usage` / `fromHook`）、`custom`、`custom_message`、`label`、`usage`、`context_edit`。助手消息自身的 `usage` 随 `message` 落盘，cache warming 记独立 `usage`（`kind=cache_warm`）。
 - **打开语义同 Pi**：坏 JSON 行跳过、行无长度上限、缺尾换行补 `\n`；v1 补 ID/parent 链并把 `firstKeptEntryIndex` 换成 `firstKeptEntryId`，v2 把 `hookMessage` 改名 `custom`，迁移后写回 v3。常规打开不会重写未知 entry。
@@ -220,7 +222,7 @@ frontmatter 按 Pi 的方式提取：CRLF 归一、去 BOM、闭合围栏是 off
 |---|---|
 | 根 | `$NULO_HOME` 否则 `~/.nulo` |
 | agent | `$NULO_CODING_AGENT_DIR` 否则 `<根>/agent` |
-| 会话 | `$NULO_CODING_AGENT_SESSION_DIR` 否则 `<agent>/sessions` |
+| 会话 | `$NULO_SESSION_DIR`（旧 `$NULO_CODING_AGENT_SESSION_DIR` 兼容）否则 `<agent>/sessions` |
 | 项目配置目录 | `<cwd>/.nulo/` |
 | auth / models / mcp | `<agent>/auth.json`、`models.json`、`mcp.json` |
 

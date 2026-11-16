@@ -33,6 +33,13 @@ func BuildModel(spec string, svcs *AgentSessionServices) (Model, error) {
 	case "", "faux", "faux/faux-1":
 		return DefaultFauxModel(), nil
 	}
+	if svcs != nil && svcs.Registry != nil {
+		for _, model := range svcs.Registry.Models() {
+			if spec == model.ID || spec == model.Provider+"/"+model.ID {
+				return model, nil
+			}
+		}
+	}
 	dir := ""
 	var providers ai.Providers
 	if svcs != nil {

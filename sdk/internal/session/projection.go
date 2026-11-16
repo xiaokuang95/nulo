@@ -203,5 +203,5 @@ func isJSONString(raw json.RawMessage) bool {
 }
 
 func fileTimestamp(t time.Time) string {
-	return t.UTC().Format("2006-01-02T15-04-05-000Z")
+	return t.UTC().Format("20060102-150405-000Z")
 }

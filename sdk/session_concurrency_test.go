@@ -34,7 +34,7 @@ func TestConcurrentSessionsKeepEventsApart(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { rt.Close() })
-		sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+		sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []AgentTool{}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +98,7 @@ func TestSubscribeDeliversToEveryListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt.Close()
-	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []AgentTool{}})
 	if err != nil {
 		t.Fatal(err)
 	}

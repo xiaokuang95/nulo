@@ -22,7 +22,7 @@ func TestPromptImageAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt.Close()
-	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []AgentTool{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestPromptImageRejectsInvalidBase64(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt.Close()
-	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []AgentTool{}})
 	if err != nil {
 		t.Fatal(err)
 	}

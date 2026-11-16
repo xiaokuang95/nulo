@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xiaokuang95/nulo/sdk/internal/ai"
@@ -75,15 +76,26 @@ func TestForkParentSession(t *testing.T) {
 	}
 }
 
-func TestSessionPathEncoding(t *testing.T) {
-	got := EncodeCWD("/Users/a/b:c")
-	if got != "--Users-a-b-c--" {
-		t.Fatalf("got %q", got)
+func TestSessionProjectPath(t *testing.T) {
+	cwd := filepath.Join(t.TempDir(), "a", "nulo")
+	key := ProjectKey(cwd)
+	if !strings.HasPrefix(key, "nulo-") || len(key) != len("nulo-")+12 {
+		t.Fatalf("project key = %q", key)
 	}
-	cwd := filepath.Join(t.TempDir(), "a", "b")
+	if key != ProjectKey(filepath.Join(filepath.Dir(cwd), ".", "nulo")) {
+		t.Fatal("project key is not stable")
+	}
+	other := filepath.Join(t.TempDir(), "a", "nulo")
+	if key == ProjectKey(other) {
+		t.Fatal("same basename must still be disambiguated by cwd")
+	}
 	dir := SessionDir(t.TempDir(), cwd)
-	if filepath.Base(dir) != EncodeCWD(ResolveCWD(cwd)) {
+	if filepath.Base(dir) != key {
 		t.Fatalf("%s", dir)
+	}
+	legacy := filepath.Base(LegacySessionDirIn(t.TempDir(), "/Users/a/b:c"))
+	if !strings.HasPrefix(legacy, "--") || !strings.HasSuffix(legacy, "--") {
+		t.Fatalf("legacy dir = %q", legacy)
 	}
 }
 

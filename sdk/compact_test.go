@@ -16,7 +16,7 @@ func TestCompactManual(t *testing.T) {
 	})
 	rt, _ := NewRuntime(RuntimeOptions{Services: svcs})
 	defer rt.Close()
-	sess, _ := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+	sess, _ := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []AgentTool{}})
 	_, err := sess.Compact(context.Background(), "")
 	if err == nil || !strings.Contains(err.Error(), "Nothing to compact") {
 		t.Fatalf("small: %v", err)

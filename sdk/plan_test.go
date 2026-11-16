@@ -98,7 +98,7 @@ func TestSetPlanNormalizesStatuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt.Close()
-	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []Tool{}})
+	sess, err := rt.New(SessionStartOptions{Model: DefaultFauxModel(), Tools: []AgentTool{}})
 	if err != nil {
 		t.Fatal(err)
 	}
